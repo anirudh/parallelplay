@@ -1,0 +1,22 @@
+{
+  "name": "@parallelplay/driver-generic-command",
+  "version": "0.1.0",
+  "description": "Generic command driver for ParallelPlay",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@parallelplay/runtime": "workspace:*"
+  }
+}

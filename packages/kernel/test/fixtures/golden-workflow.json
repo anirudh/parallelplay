@@ -1,0 +1,70 @@
+{
+  "workflowId": "00000000-0000-4000-8000-000000000002",
+  "version": 1,
+  "name": "Golden workflow",
+  "schemaVersion": 2,
+  "steps": [
+    {
+      "id": "plan",
+      "capability": "planning",
+      "dependsOn": [],
+      "execution": {
+        "protocolVersion": 1,
+        "image": "parallelplay-fixture@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "argv": ["/bin/true"],
+        "workingDirectory": "/workspace"
+      },
+      "capabilities": {
+        "schemaVersion": 1,
+        "workspace": "read_write",
+        "artifactOutput": "read_write",
+        "scratch": "read_write",
+        "cpuLimit": 1,
+        "memoryLimitBytes": 268435456,
+        "pidsLimit": 64,
+        "network": [],
+        "secrets": [],
+        "git": []
+      },
+      "verification": {
+        "mode": "verify",
+        "argv": ["./verify.sh"],
+        "cwd": ".",
+        "timeoutMs": 1000,
+        "environment": {},
+        "toolProbes": []
+      }
+    },
+    {
+      "id": "build",
+      "capability": "implementation",
+      "dependsOn": ["plan"],
+      "execution": {
+        "protocolVersion": 1,
+        "image": "parallelplay-fixture@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "argv": ["/bin/true"],
+        "workingDirectory": "/workspace"
+      },
+      "capabilities": {
+        "schemaVersion": 1,
+        "workspace": "read_write",
+        "artifactOutput": "read_write",
+        "scratch": "read_write",
+        "cpuLimit": 1,
+        "memoryLimitBytes": 268435456,
+        "pidsLimit": 64,
+        "network": [],
+        "secrets": [],
+        "git": []
+      },
+      "verification": {
+        "mode": "verify",
+        "argv": ["./verify.sh"],
+        "cwd": ".",
+        "timeoutMs": 1000,
+        "environment": {},
+        "toolProbes": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@parallelplay/conformance",
+  "version": "0.1.0",
+  "description": "Machine-readable ParallelPlay extension conformance suite",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@parallelplay/contracts": "workspace:*",
+    "zod": "4.4.3"
+  }
+}

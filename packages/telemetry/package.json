@@ -1,0 +1,22 @@
+{
+  "name": "@parallelplay/telemetry",
+  "version": "0.1.0",
+  "description": "Opt-in metadata-only OpenTelemetry bridge for ParallelPlay",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.9.0"
+  }
+}

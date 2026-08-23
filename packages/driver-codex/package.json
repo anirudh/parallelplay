@@ -1,0 +1,24 @@
+{
+  "name": "@parallelplay/driver-codex",
+  "version": "0.1.0",
+  "description": "Contained Codex SDK driver for ParallelPlay",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "0.149.0",
+    "@parallelplay/contracts": "workspace:*",
+    "zod": "4.4.3"
+  }
+}

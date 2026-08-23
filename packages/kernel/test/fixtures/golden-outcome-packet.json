@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "packetVersion": 1,
+  "outcomePacketId": "70000000-0000-4000-8000-000000000012",
+  "programId": "70000000-0000-4000-8000-000000000001",
+  "milestoneId": "70000000-0000-4000-8000-000000000002",
+  "runId": "70000000-0000-4000-8000-000000000003",
+  "baseRevisionId": "70000000-0000-4000-8000-000000000004",
+  "candidateRevisionId": "70000000-0000-4000-8000-000000000005",
+  "intentDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "milestoneContractDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "workflowDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "criteriaResults": [
+    {
+      "criterionId": "candidate-verifies",
+      "statement": "The candidate passes the registered verifier.",
+      "result": "pass",
+      "evidenceRefs": [
+        {
+          "kind": "verification",
+          "id": "70000000-0000-4000-8000-000000000009",
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ]
+    }
+  ],
+  "attemptHistory": [
+    {
+      "attemptId": "70000000-0000-4000-8000-000000000006",
+      "jobId": "70000000-0000-4000-8000-000000000007",
+      "ordinal": 1,
+      "status": "succeeded",
+      "terminationReason": "completed",
+      "usage": { "cpuMillis": 125, "memoryPeakBytes": 1048576 }
+    }
+  ],
+  "driverReceipts": [
+    {
+      "kind": "driver_receipt",
+      "id": "70000000-0000-4000-8000-000000000008",
+      "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "verificationReceipts": [
+    {
+      "kind": "verification",
+      "id": "70000000-0000-4000-8000-000000000009",
+      "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "artifactManifests": [
+    {
+      "kind": "artifact_manifest",
+      "id": "70000000-0000-4000-8000-000000000010",
+      "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "kind": "artifact_manifest",
+      "id": "70000000-0000-4000-8000-000000000011",
+      "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "capabilitiesUsed": ["workspace.write"],
+  "terminalReason": "verified_success",
+  "summary": "All 1 milestone criteria passed verification.",
+  "deviationReasons": ["completed"],
+  "recommendation": "merge",
+  "humanEvidenceFocus": ["Review the candidate diff and verification receipt before merging."],
+  "generatedAt": "2026-08-20T12:00:00.000Z"
+}

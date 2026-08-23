@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/anirudh/parallelplay/compatibility/registry.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "suiteVersion", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "suiteVersion": { "type": "string", "const": "0.1.0" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "extensionId",
+          "extensionVersion",
+          "artifactDigest",
+          "sourceCommit",
+          "conformanceReportDigest",
+          "sbomDigest",
+          "provenanceDigest",
+          "platforms",
+          "approvedAt"
+        ],
+        "properties": {
+          "extensionId": { "type": "string", "pattern": "^[a-z][a-z0-9._-]*$" },
+          "extensionVersion": { "type": "string" },
+          "artifactDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "sourceCommit": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+          "conformanceReportDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "sbomDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "provenanceDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "platforms": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "approvedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

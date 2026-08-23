@@ -1,0 +1,4 @@
+dist
+coverage
+pnpm-lock.yaml
+packages/kernel/test/fixtures/golden-task-projection.md

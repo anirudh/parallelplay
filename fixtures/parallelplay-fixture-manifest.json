@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/anirudh/parallelplay-fixture",
+  "runtime": {
+    "node": "22.17.1",
+    "pnpm": "11.19.0",
+    "containerImage": "node:22.17.1-bookworm-slim@sha256:2fa754a9ba4d7adbd2a51d182eaabbe355c82b673624035a38c0d42b08724854"
+  },
+  "revisions": {
+    "baseline": "ce8280a6458c56e92a516317fe77fb3835dc41b3",
+    "completeTaskCandidate": "16bf5c25f3fe721d344163b31d137598ab2398e0"
+  },
+  "verification": ["corepack", "pnpm", "verify"],
+  "protocolFixtures": [
+    "/protocol/success.sh",
+    "/protocol/retryable.sh",
+    "/protocol/approval.sh",
+    "/protocol/missing-terminal.sh",
+    "/protocol/malformed.sh",
+    "/protocol/capability-violation.sh"
+  ],
+  "networkRequired": false,
+  "credentialsRequired": false
+}

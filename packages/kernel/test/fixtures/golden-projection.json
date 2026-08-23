@@ -1,0 +1,328 @@
+{
+  "projectionSchemaVersion": 1,
+  "programs": [
+    {
+      "kind": "program",
+      "programId": "00000000-0000-4000-8000-000000000001",
+      "name": "Golden program",
+      "status": "active",
+      "programMode": "legacy_v1",
+      "phase": "legacy_active",
+      "attentionPriority": "p2",
+      "resumePhase": null,
+      "executionRequestId": null,
+      "executionRequestedAt": null,
+      "executionPolicy": null,
+      "initialSourceRevisionId": null,
+      "initialSourceRevisionDigest": null,
+      "activeGraphRevisionId": null,
+      "activeGraphDigest": null,
+      "intent": null,
+      "intentDigest": null,
+      "approvedBy": null,
+      "approvedAt": null,
+      "startedAt": null,
+      "createdAt": "2026-08-17T12:00:00.000Z",
+      "version": 1
+    }
+  ],
+  "milestones": [],
+  "outcomePackets": [],
+  "workflows": [
+    {
+      "kind": "workflow",
+      "workflowId": "00000000-0000-4000-8000-000000000002",
+      "version": 1,
+      "name": "Golden workflow",
+      "definition": {
+        "workflowId": "00000000-0000-4000-8000-000000000002",
+        "version": 1,
+        "name": "Golden workflow",
+        "schemaVersion": 2,
+        "steps": [
+          {
+            "id": "plan",
+            "capability": "planning",
+            "dependsOn": [],
+            "execution": {
+              "protocolVersion": 1,
+              "image": "parallelplay-fixture@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "argv": ["/bin/true"],
+              "workingDirectory": "/workspace"
+            },
+            "capabilities": {
+              "schemaVersion": 1,
+              "workspace": "read_write",
+              "artifactOutput": "read_write",
+              "scratch": "read_write",
+              "cpuLimit": 1,
+              "memoryLimitBytes": 268435456,
+              "pidsLimit": 64,
+              "network": [],
+              "secrets": [],
+              "git": []
+            },
+            "verification": {
+              "mode": "verify",
+              "argv": ["./verify.sh"],
+              "cwd": ".",
+              "timeoutMs": 1000,
+              "environment": {},
+              "toolProbes": []
+            }
+          },
+          {
+            "id": "build",
+            "capability": "implementation",
+            "dependsOn": ["plan"],
+            "execution": {
+              "protocolVersion": 1,
+              "image": "parallelplay-fixture@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "argv": ["/bin/true"],
+              "workingDirectory": "/workspace"
+            },
+            "capabilities": {
+              "schemaVersion": 1,
+              "workspace": "read_write",
+              "artifactOutput": "read_write",
+              "scratch": "read_write",
+              "cpuLimit": 1,
+              "memoryLimitBytes": 268435456,
+              "pidsLimit": 64,
+              "network": [],
+              "secrets": [],
+              "git": []
+            },
+            "verification": {
+              "mode": "verify",
+              "argv": ["./verify.sh"],
+              "cwd": ".",
+              "timeoutMs": 1000,
+              "environment": {},
+              "toolProbes": []
+            }
+          }
+        ]
+      },
+      "definitionDigest": "a64154fca9fb35de30d5f18efcf7bffd727c1ffc3401d5019f7bfb621d69584a",
+      "registeredAt": "2026-08-17T12:00:00.000Z",
+      "streamVersion": 1
+    }
+  ],
+  "runs": [
+    {
+      "kind": "run",
+      "runId": "00000000-0000-4000-8000-000000000003",
+      "programId": "00000000-0000-4000-8000-000000000001",
+      "workflowId": "00000000-0000-4000-8000-000000000002",
+      "workflowVersion": 1,
+      "milestoneId": null,
+      "generationId": null,
+      "generation": null,
+      "status": "cancelled",
+      "createdAt": "2026-08-17T12:00:00.000Z",
+      "scheduledAt": "2026-08-17T12:00:00.000Z",
+      "startedAt": "2026-08-17T12:00:00.000Z",
+      "completedAt": "2026-08-17T12:00:00.000Z",
+      "cancelledAt": "2026-08-17T12:00:00.000Z",
+      "cancellationReason": "Stopped by operator",
+      "failureReason": null,
+      "version": 4
+    }
+  ],
+  "jobs": [
+    {
+      "kind": "job",
+      "jobId": "00000000-0000-4000-8000-000000000005",
+      "runId": "00000000-0000-4000-8000-000000000003",
+      "stepId": "plan",
+      "capability": "planning",
+      "dependencyJobIds": [],
+      "status": "cancelled",
+      "policy": {
+        "maxAttempts": 3,
+        "attemptTimeoutMs": 300000,
+        "retryDelaysMs": [1000, 5000]
+      },
+      "attemptCount": 1,
+      "activeAttemptId": null,
+      "availableAt": "2026-08-17T12:00:00.000Z",
+      "leaseOwnerId": null,
+      "leaseFencingToken": 1,
+      "leaseAcquiredAt": null,
+      "leaseExpiresAt": null,
+      "createdAt": "2026-08-17T12:00:00.000Z",
+      "completedAt": "2026-08-17T12:00:00.000Z",
+      "failureReason": "operator_cancelled",
+      "sourceRevisionId": "00000000-0000-4000-8000-000000000010",
+      "executionContract": {
+        "protocolVersion": 1,
+        "image": "parallelplay-fixture@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "argv": ["/bin/true"],
+        "workingDirectory": "/workspace"
+      },
+      "executionContractDigest": "80489600dc735a02675f7ad7e897c6124b249db2e7a5a4def6f7f15c798d3a35",
+      "capabilityManifest": {
+        "schemaVersion": 1,
+        "workspace": "read_write",
+        "artifactOutput": "read_write",
+        "scratch": "read_write",
+        "cpuLimit": 1,
+        "memoryLimitBytes": 268435456,
+        "pidsLimit": 64,
+        "network": [],
+        "secrets": [],
+        "git": []
+      },
+      "capabilityManifestDigest": "4fb5d7aef1ac092e67c36643d05fdc7011c4600ffb04e8e3c9b331e23ed50881",
+      "contextPacketId": null,
+      "contextPacketDigest": null,
+      "verifierContract": {
+        "mode": "verify",
+        "argv": ["./verify.sh"],
+        "cwd": ".",
+        "timeoutMs": 1000,
+        "environment": {},
+        "toolProbes": []
+      },
+      "verifierContractDigest": "ac8ff14e24b6578734a3e3f8425ef8b710480f57326a0d1280c402687a6d287a",
+      "candidateRevisionId": null,
+      "version": 3
+    },
+    {
+      "kind": "job",
+      "jobId": "00000000-0000-4000-8000-000000000006",
+      "runId": "00000000-0000-4000-8000-000000000003",
+      "stepId": "build",
+      "capability": "implementation",
+      "dependencyJobIds": ["00000000-0000-4000-8000-000000000005"],
+      "status": "cancelled",
+      "policy": {
+        "maxAttempts": 3,
+        "attemptTimeoutMs": 300000,
+        "retryDelaysMs": [1000, 5000]
+      },
+      "attemptCount": 0,
+      "activeAttemptId": null,
+      "availableAt": "2026-08-17T12:00:00.000Z",
+      "leaseOwnerId": null,
+      "leaseFencingToken": 0,
+      "leaseAcquiredAt": null,
+      "leaseExpiresAt": null,
+      "createdAt": "2026-08-17T12:00:00.000Z",
+      "completedAt": "2026-08-17T12:00:00.000Z",
+      "failureReason": "operator_cancelled",
+      "sourceRevisionId": "00000000-0000-4000-8000-000000000010",
+      "executionContract": {
+        "protocolVersion": 1,
+        "image": "parallelplay-fixture@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "argv": ["/bin/true"],
+        "workingDirectory": "/workspace"
+      },
+      "executionContractDigest": "80489600dc735a02675f7ad7e897c6124b249db2e7a5a4def6f7f15c798d3a35",
+      "capabilityManifest": {
+        "schemaVersion": 1,
+        "workspace": "read_write",
+        "artifactOutput": "read_write",
+        "scratch": "read_write",
+        "cpuLimit": 1,
+        "memoryLimitBytes": 268435456,
+        "pidsLimit": 64,
+        "network": [],
+        "secrets": [],
+        "git": []
+      },
+      "capabilityManifestDigest": "4fb5d7aef1ac092e67c36643d05fdc7011c4600ffb04e8e3c9b331e23ed50881",
+      "contextPacketId": null,
+      "contextPacketDigest": null,
+      "verifierContract": {
+        "mode": "verify",
+        "argv": ["./verify.sh"],
+        "cwd": ".",
+        "timeoutMs": 1000,
+        "environment": {},
+        "toolProbes": []
+      },
+      "verifierContractDigest": "ac8ff14e24b6578734a3e3f8425ef8b710480f57326a0d1280c402687a6d287a",
+      "candidateRevisionId": null,
+      "version": 2
+    }
+  ],
+  "attempts": [
+    {
+      "kind": "attempt",
+      "attemptId": "00000000-0000-4000-8000-000000000004",
+      "runId": "00000000-0000-4000-8000-000000000003",
+      "jobId": "00000000-0000-4000-8000-000000000005",
+      "ordinal": 1,
+      "status": "cancelled",
+      "allocatedAt": "2026-08-17T12:00:00.000Z",
+      "startedAt": "2026-08-17T12:00:00.000Z",
+      "deadlineAt": "2026-08-17T12:05:00.000Z",
+      "externalRunId": null,
+      "driverCursor": 0,
+      "cumulativeUsage": null,
+      "candidateRevisionId": null,
+      "driverReceiptId": null,
+      "finishedAt": "2026-08-17T12:00:00.000Z",
+      "cancelledAt": "2026-08-17T12:00:00.000Z",
+      "cancellationReason": "operator_cancelled",
+      "terminationReason": "operator_cancelled",
+      "version": 2
+    }
+  ],
+  "outbox": [
+    {
+      "kind": "outbox",
+      "outboxId": "00000000-0000-4000-8000-000000000007",
+      "runId": "00000000-0000-4000-8000-000000000003",
+      "jobId": "00000000-0000-4000-8000-000000000005",
+      "attemptId": "00000000-0000-4000-8000-000000000004",
+      "effectKey": "00000000-0000-4000-8000-000000000007",
+      "effect": {
+        "effectType": "agent.start",
+        "driver": "generic-command",
+        "capability": "planning",
+        "attemptId": "00000000-0000-4000-8000-000000000004",
+        "attemptStartedAt": "2026-08-17T12:00:00.000Z",
+        "jobId": "00000000-0000-4000-8000-000000000005",
+        "runId": "00000000-0000-4000-8000-000000000003",
+        "baseRevisionId": "00000000-0000-4000-8000-000000000010",
+        "executionContract": {
+          "protocolVersion": 1,
+          "image": "parallelplay-fixture@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "argv": ["/bin/true"],
+          "workingDirectory": "/workspace"
+        },
+        "executionContractDigest": "80489600dc735a02675f7ad7e897c6124b249db2e7a5a4def6f7f15c798d3a35",
+        "capabilityManifest": {
+          "schemaVersion": 1,
+          "workspace": "read_write",
+          "artifactOutput": "read_write",
+          "scratch": "read_write",
+          "cpuLimit": 1,
+          "memoryLimitBytes": 268435456,
+          "pidsLimit": 64,
+          "network": [],
+          "secrets": [],
+          "git": []
+        },
+        "capabilityManifestDigest": "4fb5d7aef1ac092e67c36643d05fdc7011c4600ffb04e8e3c9b331e23ed50881"
+      },
+      "status": "obsolete",
+      "deliveryAttempts": 0,
+      "retryDelaysMs": [250, 1000, 5000, 10000, 30000, 30000, 30000],
+      "availableAt": "2026-08-17T12:00:00.000Z",
+      "leaseOwnerId": null,
+      "leaseFencingToken": 0,
+      "leaseAcquiredAt": null,
+      "leaseExpiresAt": null,
+      "externalEffectId": null,
+      "createdAt": "2026-08-17T12:00:00.000Z",
+      "deliveredAt": null,
+      "lastError": "operator_cancelled",
+      "version": 2
+    }
+  ],
+  "lastAppliedPosition": 16
+}

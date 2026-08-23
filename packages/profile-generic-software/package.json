@@ -1,0 +1,22 @@
+{
+  "name": "@parallelplay/profile-generic-software",
+  "version": "0.1.0",
+  "description": "Neutral software-delivery profile for ParallelPlay",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@parallelplay/contracts": "workspace:*"
+  }
+}

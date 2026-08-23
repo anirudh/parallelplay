@@ -1,0 +1,24 @@
+{
+  "snapshotVersion": 4,
+  "programs": [
+    {
+      "programId": "60000000-0000-4000-8000-000000000002",
+      "name": "Explorer program",
+      "objective": "Inspect one milestone."
+    }
+  ],
+  "milestones": [
+    {
+      "milestoneId": "60000000-0000-4000-8000-000000000003",
+      "title": "Explorer milestone",
+      "status": "outcome_ready",
+      "runId": "60000000-0000-4000-8000-000000000006",
+      "candidateRevisionId": null,
+      "criterionResults": [{ "criterionId": "visible", "result": "unverified" }],
+      "attempts": [],
+      "driverReceiptIds": [],
+      "verificationReceiptIds": [],
+      "recommendation": "investigate"
+    }
+  ]
+}

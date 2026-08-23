@@ -1,0 +1,25 @@
+{
+  "name": "@parallelplay/runtime",
+  "version": "0.1.0",
+  "description": "Contained execution and reconciliation runtime for ParallelPlay",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@parallelplay/contracts": "workspace:*",
+    "@parallelplay/kernel": "workspace:*",
+    "better-sqlite3": "13.0.3",
+    "zod": "4.4.3"
+  }
+}

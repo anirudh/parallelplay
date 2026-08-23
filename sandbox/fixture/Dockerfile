@@ -1,0 +1,3 @@
+FROM sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+
+COPY --chmod=0555 *.sh /fixture/

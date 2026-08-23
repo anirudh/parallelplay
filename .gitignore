@@ -1,0 +1,12 @@
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+.DS_Store
+.parallelplay-sandbox-image
+.parallelplay-release/
+.parallelplay-conformance/

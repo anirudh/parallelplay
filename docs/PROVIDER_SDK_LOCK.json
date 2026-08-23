@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "evaluatedAt": "2026-08-23T00:00:00.000Z",
+  "upgradePolicy": "Any version or integrity change requires provider compatibility, containment, restart, cancellation, and event-mapping trials.",
+  "packages": [
+    {
+      "name": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.3.241",
+      "integrity": "sha512-pIHdCSTywFe30H0oWDCKZzC4ipBLtF5YMDRKjf6PHyARg57O4l/72v3b6QKnnefwtKKMe6uWJ1Y9lUJg/sKWyA==",
+      "requiredCapabilities": [
+        "structured-events",
+        "cancellation",
+        "session-resume",
+        "explicit-settings",
+        "usage-and-cost"
+      ]
+    },
+    {
+      "name": "@openai/codex-sdk",
+      "version": "0.149.0",
+      "integrity": "sha512-wQCKyRR8JScUv+48wIOot8Oapt/0wsud1WptPTCamXYXZXjtpXVZ1UwACipbpnnesB1BLEeOiN1IFw2fgNN2Ww==",
+      "requiredCapabilities": [
+        "structured-events",
+        "cancellation",
+        "thread-resume",
+        "explicit-settings",
+        "usage"
+      ]
+    }
+  ]
+}

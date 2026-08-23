@@ -1,0 +1,22 @@
+{
+  "name": "@parallelplay/cli",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "parallelplay": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@parallelplay/attention": "workspace:*",
+    "@parallelplay/explorer": "workspace:*",
+    "@parallelplay/kernel": "workspace:*",
+    "@parallelplay/runtime": "workspace:*"
+  }
+}
