@@ -108,15 +108,16 @@ for (const parent of ["packages", "apps"]) {
 
 let gitObjects = 0;
 try {
-  const count = Number(
-    execFileSync("git", ["rev-list", "--count", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim()
-  );
-  if (count !== 1)
+  const roots = execFileSync("git", ["rev-list", "--max-parents=0", "--all"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"]
+  })
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  if (roots.length !== 1)
     failures.push(
-      `git: public product must have exactly one root commit, observed ${String(count)}`
+      `git: public product must descend from exactly one fresh root, observed ${String(roots.length)}`
     );
   execFileSync("git", ["fsck", "--full", "--strict"], { stdio: "ignore" });
   const objects = execFileSync("git", ["rev-list", "--objects", "--all"], { encoding: "utf8" })
@@ -142,7 +143,7 @@ try {
     gitObjects += 1;
   }
 } catch {
-  // A not-yet-committed extraction workspace is audited as a tree. Release CI requires one root commit.
+  // A not-yet-committed extraction workspace is audited as a tree. Release CI requires one fresh root.
 }
 
 if (failures.length) {

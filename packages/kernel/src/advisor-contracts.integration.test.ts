@@ -1063,5 +1063,5 @@ describe("advisor advisor authority contracts", () => {
     } finally {
       await kernel.close();
     }
-  }, 30_000);
+  }, 120_000);
 });

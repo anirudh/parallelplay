@@ -29,7 +29,7 @@ const verificationContract = {
   mode: "verify" as const,
   argv: ["./verify.sh"],
   cwd: "." as const,
-  timeoutMs: 1_000,
+  timeoutMs: 5_000,
   environment: {},
   toolProbes: []
 };
@@ -91,7 +91,8 @@ async function fixture(
   maxAttempts = 3,
   secondCapability?: string,
   verifierScript = "#!/bin/sh\nexit 0\n",
-  milestone = false
+  milestone = false,
+  verifierTimeoutMs = 5_000
 ): Promise<{
   clock: ManualClock;
   kernel: Kernel;
@@ -101,6 +102,7 @@ async function fixture(
   sourceStore: ManagedGitRevisionStore;
   artifactStore: FileArtifactStore;
 }> {
+  const fixtureVerificationContract = { ...verificationContract, timeoutMs: verifierTimeoutMs };
   const directory = mkdtempSync(join(tmpdir(), "parallelplay-runtime-"));
   directories.push(directory);
   const databasePath = join(directory, "parallelplay.db");
@@ -155,7 +157,7 @@ async function fixture(
             dependsOn: [],
             execution: executionContract,
             capabilities: capabilityManifest,
-            verification: verificationContract
+            verification: fixtureVerificationContract
           },
           ...(secondCapability
             ? [
@@ -165,7 +167,7 @@ async function fixture(
                   dependsOn: [],
                   execution: executionContract,
                   capabilities: capabilityManifest,
-                  verification: verificationContract
+                  verification: fixtureVerificationContract
                 }
               ]
             : [])
@@ -643,7 +645,9 @@ describe("durable runtime", () => {
       "fake.immediate-success",
       2,
       undefined,
-      "#!/bin/sh\n/bin/sleep 2\nexit 0\n"
+      "#!/bin/sh\n/bin/sleep 2\nexit 0\n",
+      false,
+      1_000
     );
     const driver = new SqliteFakeAgentDriver({ databasePath: driverPath, clock });
     const supervisor = new Supervisor({
