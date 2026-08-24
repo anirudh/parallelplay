@@ -60,14 +60,20 @@ try {
     stdio: ["pipe", "pipe", "pipe"],
     env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C" }
   });
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  let relayRunning = false;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
-      run(["container", "inspect", relayName], { stdio: "ignore" });
-      break;
+      relayRunning =
+        run(["container", "inspect", relayName, "--format", "{{.State.Running}}"], {
+          stdio: ["ignore", "pipe", "ignore"]
+        }).trim() === "true";
+      if (relayRunning) break;
     } catch {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+      // Docker may not have created the container yet.
     }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
   }
+  if (!relayRunning) throw new Error("Provider containment relay failed to start");
   run(["network", "connect", "--alias", "relay", internal, relayName]);
   relay.stdin.write(
     `${JSON.stringify({ schemaVersion: 1, token, providerSecret: secretSentinel })}\n`
