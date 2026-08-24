@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { createTarGz, directoryEntries, memoryEntry } from "./archive.mjs";
 
 const VERSION = process.env.PARALLELPLAY_RELEASE_VERSION ?? "0.1.0";
@@ -627,7 +627,17 @@ export function buildRelease(outputDirectory) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+let directExecution = false;
+if (process.argv[1]) {
+  try {
+    directExecution =
+      realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]));
+  } catch {
+    directExecution = false;
+  }
+}
+
+if (directExecution) {
   const index = process.argv.indexOf("--output");
   const output =
     index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : ".parallelplay-release/final";

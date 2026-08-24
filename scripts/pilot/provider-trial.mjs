@@ -8,12 +8,13 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 function argumentsMap(values) {
   const result = new Map();
@@ -37,6 +38,15 @@ function canonical(value) {
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 let trialPhase = "setup";
+
+function isDirectExecution(importMetaUrl, argvPath) {
+  if (!argvPath) return false;
+  try {
+    return realpathSync(fileURLToPath(importMetaUrl)) === realpathSync(resolve(argvPath));
+  } catch {
+    return false;
+  }
+}
 
 export function loadPortableOciImage(archive, image) {
   if (
@@ -431,7 +441,7 @@ function failureDiagnostic(error) {
   return `provider_${phase}_phase_internal_${sha256(message).slice(0, 12)}`;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (isDirectExecution(import.meta.url, process.argv[1])) {
   await main().catch((error) => {
     process.stderr.write(
       `${JSON.stringify({ ok: false, error: "provider_trial_failed", diagnostic: failureDiagnostic(error) })}\n`
