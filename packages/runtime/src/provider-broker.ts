@@ -178,13 +178,14 @@ export class ProviderEgressBroker {
       maxOutputTokensPerRequest
     });
     const address = this.#server.address() as AddressInfo;
+    const providerBasePath = options.provider === "openai" ? "/openai/v1" : "/anthropic";
     const unsigned = {
       schemaVersion: 1 as const,
       runId: options.runId,
       provider: options.provider,
       model: options.model,
       expiresAt,
-      endpoint: `http://${this.#advertisedHost}:${String(address.port)}/${options.provider}`,
+      endpoint: `http://${this.#advertisedHost}:${String(address.port)}${providerBasePath}`,
       maxBudgetUsd: options.maxBudgetUsd ?? null,
       maxOutputTokensPerRequest
     };

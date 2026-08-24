@@ -36,7 +36,10 @@ describe("provider egress broker", () => {
     const upstreamAddress = upstream.address() as AddressInfo;
     const broker = new ProviderEgressBroker({
       secretProvider: new EnvironmentSecretProvider({
-        environment: { OPENAI_API_KEY: "provider-secret" }
+        environment: {
+          OPENAI_API_KEY: "provider-secret",
+          ANTHROPIC_API_KEY: "anthropic-provider-secret"
+        }
       }),
       upstreams: { openai: `http://127.0.0.1:${String(upstreamAddress.port)}` }
     });
@@ -49,6 +52,15 @@ describe("provider egress broker", () => {
       secretEnvironmentName: "OPENAI_API_KEY"
     });
     expect(JSON.stringify(grant)).not.toContain("provider-secret");
+    expect(grant.endpoint).toBe(`${endpoint}/openai/v1`);
+
+    const anthropicGrant = broker.issueGrant({
+      runId: "run-anthropic",
+      provider: "anthropic",
+      model: "claude-test",
+      secretEnvironmentName: "ANTHROPIC_API_KEY"
+    });
+    expect(anthropicGrant.endpoint).toBe(`${endpoint}/anthropic`);
 
     const accepted = await fetch(`${endpoint}/openai/v1/responses`, {
       method: "POST",

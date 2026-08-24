@@ -65,6 +65,7 @@ jobs:
       - run: node scripts/provider/build-images.mjs .parallelplay-provider-images/first
       - run: node scripts/provider/build-images.mjs .parallelplay-provider-images/second
       - run: node scripts/provider/verify-images-reproducible.mjs .parallelplay-provider-images/first .parallelplay-provider-images/second
+      - run: node scripts/provider/verify-images-runtime.mjs .parallelplay-provider-images/first
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: provider-images-${{ matrix.id }}

@@ -25,6 +25,7 @@
     "conformance": "vitest run packages/conformance/src",
     "provider-lock:verify": "node scripts/verify-provider-lock.mjs",
     "provider-containment:check": "node scripts/provider-containment-check.mjs",
+    "provider-images:verify-runtime": "node scripts/provider/verify-images-runtime.mjs",
     "public:audit": "node scripts/public-audit.mjs",
     "release:build": "pnpm build && node scripts/release/build-release.mjs",
     "release:inspect": "node scripts/release/inspect-release.mjs",

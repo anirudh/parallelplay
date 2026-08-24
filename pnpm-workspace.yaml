@@ -8,6 +8,8 @@ nodeVersion: 22.17.0
 
 confirmModulesPurge: false
 
+injectWorkspacePackages: true
+
 allowBuilds:
   better-sqlite3: true
   protobufjs: false

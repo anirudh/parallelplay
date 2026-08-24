@@ -45,7 +45,9 @@ const ThreadItemSchema = z.discriminatedUnion("type", [
     type: z.literal("command_execution"),
     command: ProviderTextSchema,
     aggregated_output: ProviderTextSchema,
-    exit_code: z.number().int().optional(),
+    // Codex 0.149.0 emits null while a command is still in progress even though
+    // its declaration documents the field as omitted until completion.
+    exit_code: z.number().int().nullish(),
     status: z.enum(["in_progress", "completed", "failed"])
   }),
   z.looseObject({
@@ -108,7 +110,23 @@ function parseProviderEvent(raw: unknown): z.infer<typeof CodexEventSchema> {
   if (Buffer.byteLength(encoded, "utf8") > MAX_PROVIDER_EVENT_BYTES) {
     throw new Error("Codex provider event exceeded the validated size limit");
   }
-  return CodexEventSchema.parse(raw);
+  const parsed = CodexEventSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  const rawType =
+    typeof raw === "object" && raw !== null && "type" in raw
+      ? String((raw as { type?: unknown }).type)
+      : "missing_type";
+  const eventType = /^[a-z0-9.]{1,100}$/.test(rawType)
+    ? rawType.replaceAll(".", "_")
+    : `type_${sha256(rawType).slice(0, 12)}`;
+  const issues = parsed.error.issues.slice(0, 3).map((issue) => {
+    const path = issue.path
+      .map((segment) => String(segment))
+      .filter((segment) => /^[a-z0-9_]{1,100}$/.test(segment))
+      .join("_");
+    return `${issue.code}_${path || "root"}`;
+  });
+  throw new Error(`provider_event_protocol_invalid_${eventType}_${issues.join("_") || "unknown"}`);
 }
 
 interface CodexThreadLike {
@@ -196,6 +214,20 @@ export class CodexSdkDriver implements AgentDriverV1 {
         new Codex({
           baseUrl: options.brokerBaseUrl,
           apiKey: options.brokerToken,
+          config: {
+            model_provider: "parallelplay-broker",
+            model_providers: {
+              "parallelplay-broker": {
+                name: "ParallelPlay provider broker",
+                base_url: options.brokerBaseUrl,
+                env_key: "CODEX_API_KEY",
+                wire_api: "responses",
+                supports_websockets: false,
+                request_max_retries: 0,
+                stream_max_retries: 0
+              }
+            }
+          },
           env: {
             PATH: "/usr/local/bin:/usr/bin:/bin",
             HOME: "/session",
@@ -420,7 +452,13 @@ export class CodexSdkDriver implements AgentDriverV1 {
         this.#terminal(state, "protocol_invalid", "Codex stream ended without terminal event");
     } catch (error) {
       if (state.status === "running") {
+        const protocolReason =
+          error instanceof Error &&
+          /^provider_event_protocol_invalid_[a-z0-9_]+$/.test(error.message)
+            ? error.message
+            : null;
         const protocolInvalid =
+          protocolReason !== null ||
           error instanceof z.ZodError ||
           (error instanceof Error && error.message.includes("validated size limit"));
         this.#terminal(
@@ -433,7 +471,7 @@ export class CodexSdkDriver implements AgentDriverV1 {
           state.abortController?.signal.aborted
             ? "operator_cancelled"
             : protocolInvalid
-              ? "provider_event_protocol_invalid"
+              ? (protocolReason ?? "provider_event_protocol_invalid")
               : "provider_execution_failed"
         );
       }

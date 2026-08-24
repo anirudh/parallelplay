@@ -87,7 +87,7 @@ const HostCheckpointSchema = z.strictObject({
 type HostCheckpoint = z.infer<typeof HostCheckpointSchema>;
 
 const StoredProviderSessionSchema = z.looseObject({
-  session: z.strictObject({
+  session: z.looseObject({
     sessionId: z.string().min(1).max(500),
     checkpointDigest: z
       .string()
@@ -269,8 +269,26 @@ export class ContainerAgentDriver implements AgentDriverV1 {
     if (existing) {
       return DriverSessionV1Schema.parse(await this.#command(existing, "resume", request));
     }
-    const checkpoint = await this.#validateRestart(request);
-    const runtime = await this.#launchRuntime(checkpoint.runId, checkpoint.requestedModel);
+    let checkpoint: HostCheckpoint;
+    try {
+      checkpoint = await this.#validateRestart(request);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /^(?:Provider restart host checkpoint is invalid|Provider restart binding does not match the stored host checkpoint|Provider restart provider checkpoint is (?:unreadable|invalid(?: [a-z0-9_]+)?)|Provider session is terminal or its restart checkpoint does not match)$/.test(
+          error.message
+        )
+      ) {
+        throw error;
+      }
+      throw new Error("Provider restart checkpoint validation failed", { cause: error });
+    }
+    let runtime: LiveRuntime;
+    try {
+      runtime = await this.#launchRuntime(checkpoint.runId, checkpoint.requestedModel);
+    } catch {
+      throw new Error("Provider restart runtime launch failed");
+    }
     runtime.sessionId = request.sessionId;
     try {
       const session = DriverSessionV1Schema.parse(await this.#command(runtime, "resume", request));
@@ -279,7 +297,7 @@ export class ContainerAgentDriver implements AgentDriverV1 {
       return session;
     } catch (error) {
       await this.#dispose(runtime);
-      throw error;
+      throw new Error("Provider restart command failed", { cause: error });
     }
   }
 
@@ -463,7 +481,11 @@ export class ContainerAgentDriver implements AgentDriverV1 {
       const response = RunnerResponseSchema.parse(JSON.parse(line) as unknown);
       if (response.requestId !== requestId)
         throw new Error("Provider runner response was reordered");
-      if (!response.ok) throw new Error(`Provider runner rejected ${operation}`);
+      if (!response.ok) {
+        throw new Error(
+          `Provider runner rejected ${operation} (${response.error?.code ?? "unspecified"})`
+        );
+      }
       return response.result;
     };
     const result = runtime.commandChain.then(execute, execute);
@@ -506,7 +528,12 @@ export class ContainerAgentDriver implements AgentDriverV1 {
   }
 
   async #validateRestart(request: DriverResumeV1): Promise<HostCheckpoint> {
-    const checkpoint = await this.#readCheckpoint(request.sessionId);
+    let checkpoint: HostCheckpoint;
+    try {
+      checkpoint = await this.#readCheckpoint(request.sessionId);
+    } catch {
+      throw new Error("Provider restart host checkpoint is invalid");
+    }
     if (
       checkpoint.terminal ||
       checkpoint.provider !== this.#options.provider ||
@@ -519,8 +546,9 @@ export class ContainerAgentDriver implements AgentDriverV1 {
     ) {
       throw new Error("Provider restart binding does not match the stored host checkpoint");
     }
-    const providerState = StoredProviderSessionSchema.parse(
-      JSON.parse(
+    let providerStateInput: unknown;
+    try {
+      providerStateInput = JSON.parse(
         await readFile(
           join(
             resolve(this.#options.sessionRoot, checkpoint.runId),
@@ -529,8 +557,23 @@ export class ContainerAgentDriver implements AgentDriverV1 {
           ),
           "utf8"
         )
-      ) as unknown
-    );
+      ) as unknown;
+    } catch {
+      throw new Error("Provider restart provider checkpoint is unreadable");
+    }
+    const parsedProviderState = StoredProviderSessionSchema.safeParse(providerStateInput);
+    if (!parsedProviderState.success) {
+      const issue = parsedProviderState.error.issues[0];
+      const code = issue?.code ?? "unknown";
+      const issuePath =
+        issue?.path
+          .map((segment) => String(segment))
+          .filter((segment) => /^[a-z0-9_]{1,100}$/.test(segment))
+          .join("_") ?? "";
+      const path = issuePath.length > 0 ? issuePath : "root";
+      throw new Error(`Provider restart provider checkpoint is invalid ${code}_${path}`);
+    }
+    const providerState = parsedProviderState.data;
     if (
       providerState.status !== "running" ||
       providerState.terminalReason !== null ||
@@ -579,8 +622,14 @@ export class ContainerAgentDriver implements AgentDriverV1 {
   async #waitForContainer(name: string): Promise<void> {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
-        await this.#docker(["container", "inspect", name]);
-        return;
+        const running = await this.#docker([
+          "container",
+          "inspect",
+          "--format",
+          "{{.State.Running}}",
+          name
+        ]);
+        if (running === "true") return;
       } catch {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
       }
@@ -588,8 +637,8 @@ export class ContainerAgentDriver implements AgentDriverV1 {
     throw new Error("Provider relay container did not start");
   }
 
-  async #docker(args: string[]): Promise<void> {
-    await execFileAsync(this.#options.dockerBinary, args, {
+  async #docker(args: string[]): Promise<string> {
+    const result = await execFileAsync(this.#options.dockerBinary, args, {
       env: {
         PATH: process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin",
         LANG: "C",
@@ -597,6 +646,7 @@ export class ContainerAgentDriver implements AgentDriverV1 {
       },
       maxBuffer: 1024 * 1024
     });
+    return result.stdout.trim();
   }
 
   async #dispose(runtime: LiveRuntime): Promise<void> {

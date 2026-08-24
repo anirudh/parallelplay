@@ -75,6 +75,17 @@ describe("Codex SDK driver", () => {
                 yield { type: "thread.started", thread_id: "thread-1" };
                 yield { type: "turn.started" };
                 yield {
+                  type: "item.started",
+                  item: {
+                    id: "command-1",
+                    type: "command_execution",
+                    command: "true",
+                    aggregated_output: "",
+                    exit_code: null,
+                    status: "in_progress"
+                  }
+                };
+                yield {
                   type: "turn.completed",
                   usage: {
                     input_tokens: 10,
@@ -202,7 +213,9 @@ describe("Codex SDK driver", () => {
     });
     const receipt = await eventually(() => driver.collectReceipt(session.sessionId));
     expect(receipt.outcome).toBe("protocol_invalid");
-    expect(receipt.terminalReason).toBe("provider_event_protocol_invalid");
+    expect(receipt.terminalReason).toBe(
+      "provider_event_protocol_invalid_thread_started_unrecognized_keys_root"
+    );
     expect(JSON.stringify(receipt)).not.toContain("do-not-retain");
   });
 });

@@ -9,7 +9,7 @@ RUN corepack enable && corepack prepare pnpm@11.19.0 --activate
 COPY . .
 RUN pnpm install --frozen-lockfile --ignore-scripts
 RUN pnpm --filter "${TARGET_PACKAGE}..." build
-RUN pnpm --filter "${TARGET_PACKAGE}" deploy /output --prod --legacy
+RUN pnpm --filter "${TARGET_PACKAGE}" deploy /output --prod --ignore-scripts
 
 FROM node:22.17.1-bookworm-slim@sha256:2fa754a9ba4d7adbd2a51d182eaabbe355c82b673624035a38c0d42b08724854
 ENV NODE_ENV=production \

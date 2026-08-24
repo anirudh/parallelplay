@@ -28,6 +28,7 @@ function canonical(value) {
 }
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+let trialPhase = "setup";
 
 async function main() {
   const args = argumentsMap(process.argv.slice(2));
@@ -198,10 +199,20 @@ async function main() {
         monetaryCost: event.monetaryCost
       }))
   });
+  const receiptFailure = (phase, receipt) => {
+    const outcome = /^[a-z0-9_]{1,100}$/.test(receipt.outcome)
+      ? receipt.outcome
+      : `outcome_${sha256(String(receipt.outcome)).slice(0, 12)}`;
+    const terminalReason = /^[a-z0-9_]{1,100}$/.test(receipt.terminalReason ?? "")
+      ? receipt.terminalReason
+      : `reason_${sha256(String(receipt.terminalReason)).slice(0, 12)}`;
+    return `provider_${phase}_phase_${outcome}_${terminalReason}`;
+  };
 
   const evidence = { schemaVersion: 1, provider, model: expected.model, budgetCapUsd: budget };
   const liveDrivers = [];
   try {
+    trialPhase = "success";
     const successRun = randomUUID();
     copyFixture(successRun);
     const successDriver = makeDriver();
@@ -214,9 +225,12 @@ async function main() {
       (batch) => batch.status !== "running"
     );
     const successReceipt = await successDriver.collectReceipt(successSession.sessionId);
-    if (successReceipt.outcome !== "succeeded") throw new Error("provider_success_phase_failed");
+    if (successReceipt.outcome !== "succeeded") {
+      throw new Error(receiptFailure("success", successReceipt));
+    }
     evidence.success = receiptSummary(successReceipt, successTerminal.events);
 
+    trialPhase = "cancellation";
     const cancelRun = randomUUID();
     copyFixture(cancelRun);
     const cancelDriver = makeDriver();
@@ -236,16 +250,18 @@ async function main() {
     );
     const cancelReceipt = await cancelDriver.collectReceipt(cancelSession.sessionId);
     if (cancelReceipt.outcome !== "operator_cancelled") {
-      throw new Error("provider_cancellation_phase_failed");
+      throw new Error(receiptFailure("cancellation", cancelReceipt));
     }
     evidence.cancellation = receiptSummary(cancelReceipt, cancelTerminal.events);
 
+    trialPhase = "restart_start";
     const restartRun = randomUUID();
     copyFixture(restartRun);
     const crashedDriver = makeDriver();
     liveDrivers.push(crashedDriver);
     const restartLaunch = launch("restart", restartRun);
     const restartSession = await crashedDriver.start(restartLaunch);
+    trialPhase = "restart_checkpoint";
     const checkpointed = await poll(
       crashedDriver,
       restartSession.sessionId,
@@ -256,6 +272,7 @@ async function main() {
       .reverse()
       .find((event) => event.type === "checkpoint")?.checkpointDigest;
     if (!checkpoint) throw new Error("provider_restart_checkpoint_missing");
+    trialPhase = "restart_runner_discovery";
     const prefix = restartRun.replaceAll("-", "").slice(0, 20);
     const runnerNames = execFileSync(
       "docker",
@@ -266,7 +283,9 @@ async function main() {
       .split("\n")
       .filter(Boolean);
     if (runnerNames.length !== 1) throw new Error("provider_restart_runner_not_found");
+    trialPhase = "restart_kill";
     execFileSync("docker", ["kill", runnerNames[0]], { stdio: "ignore" });
+    trialPhase = "restart_resume";
     const restartedDriver = makeDriver();
     liveDrivers.push(restartedDriver);
     await restartedDriver.resume({
@@ -278,13 +297,17 @@ async function main() {
       executionContractDigest: restartLaunch.executionContractDigest,
       capabilityManifestDigest: restartLaunch.capabilityManifestDigest
     });
+    trialPhase = "restart_poll";
     const restartTerminal = await poll(
       restartedDriver,
       restartSession.sessionId,
       (batch) => batch.status !== "running"
     );
+    trialPhase = "restart_receipt";
     const restartReceipt = await restartedDriver.collectReceipt(restartSession.sessionId);
-    if (restartReceipt.outcome !== "succeeded") throw new Error("provider_restart_phase_failed");
+    if (restartReceipt.outcome !== "succeeded") {
+      throw new Error(receiptFailure("restart", restartReceipt));
+    }
     evidence.restart = receiptSummary(restartReceipt, restartTerminal.events);
     evidence.credentialReference = expected.environmentName;
     evidence.longLivedCredentialEnteredAgent = false;
@@ -298,7 +321,48 @@ async function main() {
   }
 }
 
-await main().catch(() => {
-  process.stderr.write('{"ok":false,"error":"provider_trial_failed"}\n');
+function failureDiagnostic(error) {
+  const message = error instanceof Error ? error.message : "non_error_failure";
+  const phase = /^[a-z_]{1,100}$/.test(trialPhase) ? trialPhase : "unknown";
+  if (/^provider_[a-z0-9_]+$/.test(message)) return message;
+  if (message === "Provider relay container did not start") return "provider_relay_start_failed";
+  if (message === "Contained provider process closed its protocol") {
+    return "contained_provider_protocol_closed";
+  }
+  if (message === "Contained provider protocol timed out") {
+    return "contained_provider_protocol_timed_out";
+  }
+  const restartBoundary =
+    /^Provider restart (checkpoint validation|runtime launch|command) failed$/.exec(message);
+  if (restartBoundary) {
+    return `provider_restart_${restartBoundary[1].replaceAll(" ", "_")}_failed`;
+  }
+  const restartValidation = new Map([
+    ["Provider restart host checkpoint is invalid", "host_checkpoint_invalid"],
+    [
+      "Provider restart binding does not match the stored host checkpoint",
+      "host_checkpoint_binding_mismatch"
+    ],
+    ["Provider restart provider checkpoint is unreadable", "provider_checkpoint_unreadable"],
+    [
+      "Provider session is terminal or its restart checkpoint does not match",
+      "provider_checkpoint_binding_mismatch"
+    ]
+  ]).get(message);
+  if (restartValidation) return `provider_restart_${restartValidation}`;
+  const invalidProviderCheckpoint =
+    /^Provider restart provider checkpoint is invalid ([a-z0-9_]+)$/.exec(message);
+  if (invalidProviderCheckpoint) {
+    return `provider_restart_provider_checkpoint_invalid_${invalidProviderCheckpoint[1]}`;
+  }
+  const rejected = /^Provider runner rejected ([a-z]+) \(([a-z0-9_]+)\)$/.exec(message);
+  if (rejected) return `provider_runner_${rejected[1]}_${rejected[2]}`;
+  return `provider_${phase}_phase_internal_${sha256(message).slice(0, 12)}`;
+}
+
+await main().catch((error) => {
+  process.stderr.write(
+    `${JSON.stringify({ ok: false, error: "provider_trial_failed", diagnostic: failureDiagnostic(error) })}\n`
+  );
   process.exitCode = 1;
 });
