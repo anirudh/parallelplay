@@ -2,7 +2,15 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -29,6 +37,64 @@ function canonical(value) {
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 let trialPhase = "setup";
+
+export function loadPortableOciImage(archive, image) {
+  if (
+    !/^[^\s@]+@sha256:[a-f0-9]{64}$/.test(image.reference) ||
+    image.reference.slice(image.reference.indexOf("sha256:") + 7) !== image.imageDigest
+  ) {
+    throw new Error("oci_image_reference_invalid");
+  }
+  const readArchiveJson = (path) =>
+    JSON.parse(execFileSync("tar", ["-xOf", archive, path], { encoding: "utf8" }));
+  const index = readArchiveJson("index.json");
+  if (!index.manifests?.some((entry) => entry.digest === `sha256:${image.imageDigest}`)) {
+    throw new Error("oci_index_digest_mismatch");
+  }
+  const ociManifest = readArchiveJson(`blobs/sha256/${image.imageDigest}`);
+  const configDigest = ociManifest.config?.digest;
+  const layerDigests = ociManifest.layers?.map((layer) => layer.digest);
+  if (
+    typeof configDigest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/.test(configDigest) ||
+    !Array.isArray(layerDigests) ||
+    layerDigests.some((digest) => !/^sha256:[a-f0-9]{64}$/.test(digest))
+  ) {
+    throw new Error("oci_manifest_digest_invalid");
+  }
+  const repositoryTag = image.reference.slice(0, image.reference.indexOf("@sha256:"));
+  const temporary = mkdtempSync(join(tmpdir(), "parallelplay-provider-load-"));
+  try {
+    const dockerArchive = join(temporary, "image.tar");
+    copyFileSync(archive, dockerArchive);
+    writeFileSync(
+      join(temporary, "manifest.json"),
+      JSON.stringify([
+        {
+          Config: `blobs/sha256/${configDigest.slice(7)}`,
+          RepoTags: [repositoryTag],
+          Layers: layerDigests.map((digest) => `blobs/sha256/${digest.slice(7)}`)
+        }
+      ]),
+      { mode: 0o600 }
+    );
+    execFileSync("tar", ["-rf", dockerArchive, "-C", temporary, "manifest.json"], {
+      stdio: "ignore"
+    });
+    execFileSync("docker", ["load", "--input", dockerArchive], { stdio: "ignore" });
+    const runtimeImage = execFileSync(
+      "docker",
+      ["image", "inspect", "--format", "{{.Id}}", repositoryTag],
+      { encoding: "utf8" }
+    ).trim();
+    if (runtimeImage !== configDigest && runtimeImage !== `sha256:${image.imageDigest}`) {
+      throw new Error("loaded_image_digest_mismatch");
+    }
+    return runtimeImage;
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
 
 async function main() {
   const args = argumentsMap(process.argv.slice(2));
@@ -80,14 +146,17 @@ async function main() {
   ) {
     throw new Error("cli_oci_manifest_mismatch");
   }
+  const runtimeImages = new Map();
   for (const image of [runner, relay]) {
     const archive = join(cliRoot, "oci", `${image.name}.oci.tar`);
     if (sha256(readFileSync(archive)) !== image.archiveDigest) {
       throw new Error("oci_archive_digest_mismatch");
     }
-    execFileSync("docker", ["load", "--input", archive], { stdio: "ignore" });
-    execFileSync("docker", ["image", "inspect", image.reference], { stdio: "ignore" });
+    runtimeImages.set(image.name, loadPortableOciImage(archive, image));
   }
+  const runnerRuntimeImage = runtimeImages.get("provider-runner");
+  const relayRuntimeImage = runtimeImages.get("provider-relay");
+  if (!runnerRuntimeImage || !relayRuntimeImage) throw new Error("oci_runtime_image_missing");
 
   const runtimePath = resolve(args.get("runtime") ?? "");
   const { ContainerAgentDriver, EnvironmentSecretProvider } = await import(
@@ -108,6 +177,8 @@ async function main() {
       provider,
       runnerImage: runner.reference,
       relayImage: relay.reference,
+      runnerRuntimeImage,
+      relayRuntimeImage,
       workspaceRoot,
       sessionRoot,
       secretEnvironmentName: expected.environmentName,
@@ -360,9 +431,11 @@ function failureDiagnostic(error) {
   return `provider_${phase}_phase_internal_${sha256(message).slice(0, 12)}`;
 }
 
-await main().catch((error) => {
-  process.stderr.write(
-    `${JSON.stringify({ ok: false, error: "provider_trial_failed", diagnostic: failureDiagnostic(error) })}\n`
-  );
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  await main().catch((error) => {
+    process.stderr.write(
+      `${JSON.stringify({ ok: false, error: "provider_trial_failed", diagnostic: failureDiagnostic(error) })}\n`
+    );
+    process.exitCode = 1;
+  });
+}

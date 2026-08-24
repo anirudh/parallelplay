@@ -56,6 +56,28 @@ describe("provider container runtime", () => {
     expect(args.join(" ")).not.toContain("host.docker.internal");
   });
 
+  it("accepts a verified local image ID without accepting a mutable tag", () => {
+    const localImageId = `sha256:${"d".repeat(64)}`;
+    expect(
+      buildProviderRunnerDockerArgs({
+        name: "runner",
+        network: "run-internal",
+        image: localImageId,
+        workspace: "/private/run/workspace",
+        session: "/private/run/session"
+      }).at(-1)
+    ).toBe(localImageId);
+    expect(() =>
+      buildProviderRunnerDockerArgs({
+        name: "runner",
+        network: "run-internal",
+        image: "parallelplay-provider-runner:latest",
+        workspace: "/private/run/workspace",
+        session: "/private/run/session"
+      })
+    ).toThrow();
+  });
+
   it("requires the public manifest to bind the exact runner image", () => {
     expect(
       () =>

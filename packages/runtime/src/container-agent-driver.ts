@@ -25,6 +25,8 @@ import type { ProviderName } from "./provider-broker.js";
 
 const execFileAsync = promisify(execFile);
 const DigestPinnedImage = z.string().regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/);
+const LocalImageId = z.string().regex(/^sha256:[a-f0-9]{64}$/);
+const RuntimeImage = z.union([DigestPinnedImage, LocalImageId]);
 const RunnerResponseSchema = z.strictObject({
   schemaVersion: z.literal(1),
   requestId: z.uuid(),
@@ -54,6 +56,8 @@ export interface ContainerAgentDriverOptions {
   provider: ProviderName;
   runnerImage: string;
   relayImage: string;
+  runnerRuntimeImage?: string;
+  relayRuntimeImage?: string;
   workspaceRoot: string;
   sessionRoot: string;
   secretEnvironmentName: string;
@@ -74,6 +78,8 @@ const HostCheckpointSchema = z.strictObject({
   requestedModel: z.string().min(1).max(200),
   runnerImage: DigestPinnedImage,
   relayImage: DigestPinnedImage,
+  runnerRuntimeImage: RuntimeImage,
+  relayRuntimeImage: RuntimeImage,
   manifestArtifactDigest: z.string().regex(/^[a-f0-9]{64}$/),
   contextDigest: z.string().regex(/^[a-f0-9]{64}$/),
   executionContractDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -180,7 +186,7 @@ export function buildProviderRunnerDockerArgs(options: {
     ...hardenedDockerArgs(
       options.name,
       options.network,
-      DigestPinnedImage.parse(options.image),
+      RuntimeImage.parse(options.image),
       `${String(uid)}:${String(gid)}`
     ).slice(0, -1),
     "--mount",
@@ -194,11 +200,23 @@ export function buildProviderRunnerDockerArgs(options: {
 export class ContainerAgentDriver implements AgentDriverV1 {
   readonly manifest: ExtensionManifestV1;
   readonly #options: Required<
-    Pick<ContainerAgentDriverOptions, "maxOutputTokensPerRequest" | "maxRequests" | "dockerBinary">
+    Pick<
+      ContainerAgentDriverOptions,
+      | "maxOutputTokensPerRequest"
+      | "maxRequests"
+      | "dockerBinary"
+      | "runnerRuntimeImage"
+      | "relayRuntimeImage"
+    >
   > &
     Omit<
       ContainerAgentDriverOptions,
-      "maxOutputTokensPerRequest" | "maxRequests" | "dockerBinary" | "manifest"
+      | "maxOutputTokensPerRequest"
+      | "maxRequests"
+      | "dockerBinary"
+      | "runnerRuntimeImage"
+      | "relayRuntimeImage"
+      | "manifest"
     >;
   readonly #runtimes = new Map<string, LiveRuntime>();
 
@@ -206,6 +224,8 @@ export class ContainerAgentDriver implements AgentDriverV1 {
     const manifest = ExtensionManifestV1Schema.parse(options.manifest);
     const runnerImage = DigestPinnedImage.parse(options.runnerImage);
     const relayImage = DigestPinnedImage.parse(options.relayImage);
+    const runnerRuntimeImage = RuntimeImage.parse(options.runnerRuntimeImage ?? runnerImage);
+    const relayRuntimeImage = RuntimeImage.parse(options.relayRuntimeImage ?? relayImage);
     if (
       manifest.kind !== "driver" ||
       manifest.contract.name !== "agent-driver-v1" ||
@@ -222,6 +242,8 @@ export class ContainerAgentDriver implements AgentDriverV1 {
       ...options,
       runnerImage,
       relayImage,
+      runnerRuntimeImage,
+      relayRuntimeImage,
       maxOutputTokensPerRequest: options.maxOutputTokensPerRequest ?? 16_384,
       maxRequests: options.maxRequests ?? 128,
       dockerBinary: options.dockerBinary ?? "docker"
@@ -250,6 +272,8 @@ export class ContainerAgentDriver implements AgentDriverV1 {
         requestedModel: request.requestedModel,
         runnerImage: this.#options.runnerImage,
         relayImage: this.#options.relayImage,
+        runnerRuntimeImage: this.#options.runnerRuntimeImage,
+        relayRuntimeImage: this.#options.relayRuntimeImage,
         manifestArtifactDigest: this.manifest.artifact.sha256,
         contextDigest: request.contextDigest,
         executionContractDigest: request.executionContractDigest,
@@ -381,7 +405,7 @@ export class ContainerAgentDriver implements AgentDriverV1 {
     try {
       await this.#docker(["network", "create", egressNetwork]);
       relay = this.#spawnDocker(
-        hardenedDockerArgs(relayName, egressNetwork, this.#options.relayImage)
+        hardenedDockerArgs(relayName, egressNetwork, this.#options.relayRuntimeImage)
       );
       relay.stderr.resume();
       await this.#waitForContainer(relayName);
@@ -429,7 +453,7 @@ export class ContainerAgentDriver implements AgentDriverV1 {
         buildProviderRunnerDockerArgs({
           name: runnerName,
           network: internalNetwork,
-          image: this.#options.runnerImage,
+          image: this.#options.runnerRuntimeImage,
           workspace,
           session
         })
@@ -539,6 +563,8 @@ export class ContainerAgentDriver implements AgentDriverV1 {
       checkpoint.provider !== this.#options.provider ||
       checkpoint.runnerImage !== this.#options.runnerImage ||
       checkpoint.relayImage !== this.#options.relayImage ||
+      checkpoint.runnerRuntimeImage !== this.#options.runnerRuntimeImage ||
+      checkpoint.relayRuntimeImage !== this.#options.relayRuntimeImage ||
       checkpoint.manifestArtifactDigest !== this.manifest.artifact.sha256 ||
       checkpoint.contextDigest !== request.contextDigest ||
       checkpoint.executionContractDigest !== request.executionContractDigest ||
