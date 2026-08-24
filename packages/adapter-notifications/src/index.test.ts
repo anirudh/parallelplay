@@ -176,6 +176,16 @@ describe("signed webhook adapter", () => {
 });
 
 describe("desktop notification adapter", () => {
+  it("rejects a non-absolute macOS Applications directory before spawning", () => {
+    expect(
+      () =>
+        new StdioDesktopNotificationBridge({
+          executable: "/tmp/parallelplay-notification-bridge",
+          applicationsDirectory: "Applications"
+        })
+    ).toThrow(/Applications directory must be an absolute path/);
+  });
+
   it("rejects a closed bridge protocol without an unhandled pipe error", async () => {
     const directory = mkdtempSync(join(tmpdir(), "parallelplay-closed-notification-bridge-"));
     temporaryDirectories.push(directory);

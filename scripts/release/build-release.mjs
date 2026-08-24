@@ -146,24 +146,33 @@ function nativeNotificationBridgeEntry(cliPrefix, platform) {
   const temporary = mkdtempSync(join(tmpdir(), "parallelplay-notification-bridge-"));
   try {
     const executableName = "ParallelPlayNotificationBridge";
-    const appRoot = `${cliPrefix}/libexec/${executableName}.app/Contents`;
-    const output = join(temporary, executableName);
+    const bundledAppName = `${executableName}.app`;
+    const installedAppName = `${executableName}-${VERSION}.app`;
+    const appDirectory = join(temporary, bundledAppName);
+    const contentsDirectory = join(appDirectory, "Contents");
+    const output = join(contentsDirectory, "MacOS", executableName);
+    const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>CFBundleDevelopmentRegion</key>\n  <string>en</string>\n  <key>CFBundleDisplayName</key>\n  <string>ParallelPlay</string>\n  <key>CFBundleExecutable</key>\n  <string>${executableName}</string>\n  <key>CFBundleIdentifier</key>\n  <string>com.anirudh.parallelplay.notification-bridge</string>\n  <key>CFBundleInfoDictionaryVersion</key>\n  <string>6.0</string>\n  <key>CFBundleName</key>\n  <string>ParallelPlay</string>\n  <key>CFBundlePackageType</key>\n  <string>APPL</string>\n  <key>CFBundleShortVersionString</key>\n  <string>0.1.0</string>\n  <key>CFBundleVersion</key>\n  <string>1</string>\n  <key>LSUIElement</key>\n  <true/>\n  <key>NSPrincipalClass</key>\n  <string>NSApplication</string>\n  <key>NSUserNotificationAlertStyle</key>\n  <string>alert</string>\n</dict>\n</plist>\n`;
+    mkdirSync(dirname(output), { recursive: true, mode: 0o755 });
+    writeFileSync(join(contentsDirectory, "Info.plist"), infoPlist, { mode: 0o644 });
     execFileSync(process.execPath, ["scripts/notifications/build-macos-bridge.mjs", output], {
+      stdio: "inherit",
+      env: { ...process.env, LANG: "C", LC_ALL: "C" }
+    });
+    execFileSync("codesign", ["--force", "--sign", "-", "--timestamp=none", appDirectory], {
+      stdio: "inherit",
+      env: { ...process.env, LANG: "C", LC_ALL: "C" }
+    });
+    execFileSync("codesign", ["--verify", "--deep", "--strict", appDirectory], {
       stdio: "inherit",
       env: { ...process.env, LANG: "C", LC_ALL: "C" }
     });
     return [
       memoryEntry(
         `${cliPrefix}/libexec/parallelplay-notification-bridge`,
-        `#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec "$ROOT/libexec/${executableName}.app/Contents/MacOS/${executableName}"\n`,
+        `#!/bin/sh\nset -eu\numask 077\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nBUNDLED_APP="$ROOT/libexec/${bundledAppName}"\ncase "${"${PARALLELPLAY_NOTIFICATION_APPS_DIR:-}"}" in /*) ;; *) exit 70 ;; esac\nUSER_APPLICATIONS="$PARALLELPLAY_NOTIFICATION_APPS_DIR"\nif [ ! -e "$USER_APPLICATIONS" ]; then /bin/mkdir -m 700 "$USER_APPLICATIONS"; fi\nif [ ! -d "$USER_APPLICATIONS" ] || [ -L "$USER_APPLICATIONS" ]; then exit 70; fi\nif [ "$(/usr/bin/stat -f %u "$USER_APPLICATIONS")" != "$(/usr/bin/id -u)" ]; then exit 70; fi\nAPP="$USER_APPLICATIONS/${installedAppName}"\nif [ ! -e "$APP" ]; then /usr/bin/ditto "$BUNDLED_APP" "$APP"; /bin/sleep 1; fi\nif [ ! -d "$APP" ] || [ -L "$APP" ]; then exit 70; fi\n/usr/bin/diff -qr "$BUNDLED_APP" "$APP" >/dev/null\n/usr/bin/codesign --verify --deep --strict "$APP"\nBRIDGE_TMP=$(/usr/bin/mktemp -d "${"${TMPDIR:-/tmp}"}/parallelplay-notification-bridge.XXXXXX")\nINPUT_FIFO="$BRIDGE_TMP/input"\nOUTPUT_FIFO="$BRIDGE_TMP/output"\ncleanup() {\n  if [ -n "${"${INPUT_PID:-}"}" ]; then /bin/kill "$INPUT_PID" 2>/dev/null || true; fi\n  if [ -n "${"${OUTPUT_PID:-}"}" ]; then /bin/kill "$OUTPUT_PID" 2>/dev/null || true; fi\n  /bin/rm -f "$INPUT_FIFO" "$OUTPUT_FIFO"\n  /bin/rmdir "$BRIDGE_TMP" 2>/dev/null || true\n}\ntrap cleanup EXIT HUP INT TERM\n/usr/bin/mkfifo "$INPUT_FIFO" "$OUTPUT_FIFO"\nexec 3<&0\n/bin/cat "$OUTPUT_FIFO" &\nOUTPUT_PID=$!\n/bin/cat <&3 > "$INPUT_FIFO" &\nINPUT_PID=$!\n/usr/bin/open -n -g "$APP" --args --input-fifo "$INPUT_FIFO" --output-fifo "$OUTPUT_FIFO"\nwait "$OUTPUT_PID" || true\n/bin/kill "$INPUT_PID" 2>/dev/null || true\nwait "$INPUT_PID" || true\n`,
         0o755
       ),
-      memoryEntry(
-        `${appRoot}/Info.plist`,
-        `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>CFBundleDevelopmentRegion</key>\n  <string>en</string>\n  <key>CFBundleDisplayName</key>\n  <string>ParallelPlay</string>\n  <key>CFBundleExecutable</key>\n  <string>${executableName}</string>\n  <key>CFBundleIdentifier</key>\n  <string>com.anirudh.parallelplay.notification-bridge</string>\n  <key>CFBundleInfoDictionaryVersion</key>\n  <string>6.0</string>\n  <key>CFBundleName</key>\n  <string>ParallelPlay</string>\n  <key>CFBundlePackageType</key>\n  <string>APPL</string>\n  <key>CFBundleShortVersionString</key>\n  <string>0.1.0</string>\n  <key>CFBundleVersion</key>\n  <string>1</string>\n  <key>LSBackgroundOnly</key>\n  <true/>\n  <key>NSUserNotificationAlertStyle</key>\n  <string>alert</string>\n</dict>\n</plist>\n`,
-        0o644
-      ),
-      memoryEntry(`${appRoot}/MacOS/${executableName}`, readFileSync(output), 0o755)
+      ...directoryEntries(appDirectory, `${cliPrefix}/libexec/${bundledAppName}`)
     ];
   } finally {
     rmSync(temporary, { recursive: true, force: true });

@@ -94,7 +94,8 @@ export function inspectRelease(directory) {
       if (buildManifest.platform === "macos-arm64") {
         for (const suffix of [
           "/libexec/ParallelPlayNotificationBridge.app/Contents/Info.plist",
-          "/libexec/ParallelPlayNotificationBridge.app/Contents/MacOS/ParallelPlayNotificationBridge"
+          "/libexec/ParallelPlayNotificationBridge.app/Contents/MacOS/ParallelPlayNotificationBridge",
+          "/libexec/ParallelPlayNotificationBridge.app/Contents/_CodeSignature/CodeResources"
         ]) {
           if (!entries.some((entry) => entry.path.endsWith(suffix))) {
             failures.push(`${name}: macOS notification app entry is missing: ${suffix}`);

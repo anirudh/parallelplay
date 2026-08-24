@@ -1,8 +1,87 @@
 import AppKit
+import Darwin
 import Foundation
 import UserNotifications
 
+private func failClosed(_ code: String) -> Never {
+  FileHandle.standardError.write(Data("\(code)\n".utf8))
+  exit(EXIT_FAILURE)
+}
+
+private func isOwnerOnly(_ mode: mode_t) -> Bool {
+  (mode & 0o077) == 0
+}
+
+private func configureProtocolIO() {
+  let arguments = CommandLine.arguments
+  guard
+    arguments.count == 5,
+    arguments[1] == "--input-fifo",
+    arguments[3] == "--output-fifo"
+  else {
+    failClosed("protocol_io_arguments_invalid")
+  }
+  let inputPath = arguments[2]
+  let outputPath = arguments[4]
+  let inputURL = URL(fileURLWithPath: inputPath)
+  let outputURL = URL(fileURLWithPath: outputPath)
+  let directoryURL = inputURL.deletingLastPathComponent()
+  guard
+    inputPath.hasPrefix("/"),
+    outputPath.hasPrefix("/"),
+    directoryURL == outputURL.deletingLastPathComponent()
+  else {
+    failClosed("protocol_io_paths_invalid")
+  }
+
+  var directoryStat = stat()
+  var inputStat = stat()
+  var outputStat = stat()
+  guard
+    lstat(directoryURL.path, &directoryStat) == 0,
+    (directoryStat.st_mode & S_IFMT) == S_IFDIR,
+    directoryStat.st_uid == geteuid(),
+    isOwnerOnly(directoryStat.st_mode),
+    lstat(inputPath, &inputStat) == 0,
+    (inputStat.st_mode & S_IFMT) == S_IFIFO,
+    inputStat.st_uid == geteuid(),
+    isOwnerOnly(inputStat.st_mode),
+    lstat(outputPath, &outputStat) == 0,
+    (outputStat.st_mode & S_IFMT) == S_IFIFO,
+    outputStat.st_uid == geteuid(),
+    isOwnerOnly(outputStat.st_mode)
+  else {
+    failClosed("protocol_io_permissions_invalid")
+  }
+
+  let inputDescriptor = Darwin.open(inputPath, O_RDONLY)
+  guard inputDescriptor >= 0 else { failClosed("protocol_input_unavailable") }
+  let outputDescriptor = Darwin.open(outputPath, O_WRONLY)
+  guard outputDescriptor >= 0 else {
+    Darwin.close(inputDescriptor)
+    failClosed("protocol_output_unavailable")
+  }
+  guard
+    dup2(inputDescriptor, STDIN_FILENO) >= 0,
+    dup2(outputDescriptor, STDOUT_FILENO) >= 0
+  else {
+    Darwin.close(inputDescriptor)
+    Darwin.close(outputDescriptor)
+    failClosed("protocol_io_duplication_failed")
+  }
+  Darwin.close(inputDescriptor)
+  Darwin.close(outputDescriptor)
+}
+
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    completionHandler([.banner, .list])
+  }
+
   func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     didReceive response: UNNotificationResponse,
@@ -108,24 +187,62 @@ final class Bridge {
       respond(requestId: requestId, error: "protocol_invalid")
       return
     }
-    center.requestAuthorization(options: [.alert]) { [weak self] granted, _ in
+    center.getNotificationSettings { [weak self] settings in
       guard let self else { return }
-      guard granted else {
+      switch settings.authorizationStatus {
+      case .denied:
         self.respond(requestId: requestId, error: "notification_permission_denied")
-        return
-      }
-      let content = UNMutableNotificationContent()
-      content.title = title
-      content.body = body
-      content.userInfo = ["deepLink": deepLink]
-      self.center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) {
-        [weak self] error in
-        guard let self else { return }
-        if error != nil {
-          self.respond(requestId: requestId, error: "notification_delivery_failed")
-        } else {
-          self.respond(requestId: requestId, result: ["systemId": identifier])
+      case .notDetermined:
+        self.center.requestAuthorization(options: [.alert]) { [weak self] granted, error in
+          guard let self else { return }
+          guard error == nil else {
+            self.respond(requestId: requestId, error: "notification_permission_unavailable")
+            return
+          }
+          guard granted else {
+            self.respond(requestId: requestId, error: "notification_permission_denied")
+            return
+          }
+          self.schedule(
+            requestId: requestId,
+            identifier: identifier,
+            title: title,
+            body: body,
+            deepLink: deepLink
+          )
         }
+      case .authorized, .provisional, .ephemeral:
+        self.schedule(
+          requestId: requestId,
+          identifier: identifier,
+          title: title,
+          body: body,
+          deepLink: deepLink
+        )
+      @unknown default:
+        self.respond(requestId: requestId, error: "notification_permission_unavailable")
+      }
+    }
+  }
+
+  private func schedule(
+    requestId: String,
+    identifier: String,
+    title: String,
+    body: String,
+    deepLink: String
+  ) {
+    let content = UNMutableNotificationContent()
+    content.title = title
+    content.body = body
+    content.userInfo = ["deepLink": deepLink]
+    center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) {
+      [weak self] error in
+      guard let self else { return }
+      if error != nil {
+        self.respond(requestId: requestId, error: "notification_delivery_failed")
+      } else {
+        self.respond(requestId: requestId, result: ["systemId": identifier])
       }
     }
   }
@@ -150,6 +267,10 @@ final class Bridge {
   }
 }
 
+configureProtocolIO()
+let application = NSApplication.shared
+application.setActivationPolicy(.accessory)
+application.finishLaunching()
 let bridge = Bridge()
 DispatchQueue.global(qos: .userInitiated).async {
   while let line = readLine(strippingNewline: true) {

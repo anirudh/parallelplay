@@ -1,5 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import {
   OutboundEffectRequestV1Schema,
@@ -132,9 +134,21 @@ export class StdioDesktopNotificationBridge implements DesktopNotificationBridge
     environment?: Partial<
       Record<"DBUS_SESSION_BUS_ADDRESS" | "XDG_RUNTIME_DIR" | "DISPLAY" | "WAYLAND_DISPLAY", string>
     >;
+    applicationsDirectory?: string;
   }) {
     if (!options.executable.startsWith("/")) {
       throw new Error("Desktop notification bridge path must be absolute");
+    }
+    const applicationsDirectory =
+      options.applicationsDirectory ??
+      (process.platform === "darwin" ? join(homedir(), "Applications") : undefined);
+    if (
+      applicationsDirectory !== undefined &&
+      (!isAbsolute(applicationsDirectory) ||
+        applicationsDirectory.includes("\0") ||
+        applicationsDirectory.includes("\n"))
+    ) {
+      throw new Error("Desktop notification Applications directory must be an absolute path");
     }
     this.#child = (options.spawn ?? spawn)(options.executable, [], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -142,6 +156,9 @@ export class StdioDesktopNotificationBridge implements DesktopNotificationBridge
         PATH: "/usr/bin:/bin",
         LANG: "C",
         LC_ALL: "C",
+        ...(applicationsDirectory
+          ? { PARALLELPLAY_NOTIFICATION_APPS_DIR: applicationsDirectory }
+          : {}),
         ...Object.fromEntries(
           Object.entries(options.environment ?? {}).filter(
             ([, value]) => typeof value === "string" && value.length > 0
