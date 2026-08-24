@@ -123,3 +123,5 @@ export type {
   ProviderName
 } from "./provider-broker.js";
 export { ProviderEgressBroker } from "./provider-broker.js";
+export type { ContainerAgentDriverOptions } from "./container-agent-driver.js";
+export { ContainerAgentDriver, buildProviderRunnerDockerArgs } from "./container-agent-driver.js";

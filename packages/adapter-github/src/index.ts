@@ -2,12 +2,15 @@ import { createHash, createSign } from "node:crypto";
 import {
   OutboundEffectRequestV1Schema,
   OutboundEffectReceiptV1Schema,
+  OutboundReconcileRequestV1Schema,
+  ExtensionManifestV1Schema,
   isAutomaticActionAllowed,
   type ExtensionManifestV1,
   type OutboundAdapterV1,
   type OutboundAuthorityV1,
   type OutboundEffectReceiptV1,
   type OutboundEffectRequestV1,
+  type OutboundReconcileRequestV1,
   type OutboundReconciliationV1
 } from "@parallelplay/contracts";
 import { z } from "zod";
@@ -193,38 +196,8 @@ export class GitHubAppTokenProvider implements GitHubInstallationTokenProvider {
   }
 }
 
-function builtinManifest(): ExtensionManifestV1 {
-  return {
-    schemaVersion: 1,
-    id: "github-app",
-    displayName: "GitHub App",
-    extensionVersion: "0.1.0",
-    kind: "adapter",
-    contract: { name: "outbound-adapter-v1", version: 1 },
-    artifact: {
-      mediaType: "application/vnd.parallelplay.builtin+json",
-      reference: "builtin:github-app",
-      sha256: sha256("parallelplay-github-app-0.1.0")
-    },
-    configurationSchemaDigest: sha256("github-app-config-v1"),
-    capabilities: [
-      { name: "github-api", required: true, detail: "Least-privilege GitHub App installation" }
-    ],
-    provenance: {
-      sourceRepository: "https://github.com/anirudh/parallelplay",
-      sourceRevision: sha256("parallelplay-v0.1.0"),
-      sbomDigest: sha256("github-app-sbom-v1"),
-      attestationDigest: sha256("github-app-attestation-v1")
-    },
-    conformance: {
-      suiteVersion: "0.1.0",
-      reportDigest: sha256("github-app-conformance-pending"),
-      approvedRegistryDigest: null
-    }
-  };
-}
-
 export interface GitHubAppAdapterOptions {
+  manifest: ExtensionManifestV1;
   tokenProvider: GitHubInstallationTokenProvider;
   authority: OutboundAuthorityV1;
   fetch?: typeof globalThis.fetch;
@@ -237,8 +210,16 @@ interface ObservedEffect {
   resourceUrl: string;
 }
 
+interface LiveObservation {
+  status: "not_observed" | "observed_exact" | "observed_conflict";
+  externalId: string | null;
+  observedStateDigest: string | null;
+  resourceUrl: string | null;
+  requestId: string | null;
+}
+
 export class GitHubAppAdapter implements OutboundAdapterV1 {
-  readonly manifest = builtinManifest();
+  readonly manifest: ExtensionManifestV1;
   readonly #tokenProvider: GitHubInstallationTokenProvider;
   readonly #authority: OutboundAuthorityV1;
   readonly #fetch: typeof globalThis.fetch;
@@ -247,6 +228,15 @@ export class GitHubAppAdapter implements OutboundAdapterV1 {
   readonly #effects = new Map<string, ObservedEffect>();
 
   constructor(options: GitHubAppAdapterOptions) {
+    const manifest = ExtensionManifestV1Schema.parse(options.manifest);
+    if (
+      manifest.id !== "github-app" ||
+      manifest.kind !== "adapter" ||
+      manifest.contract.name !== "outbound-adapter-v1"
+    ) {
+      throw new Error("GitHub adapter requires a github-app outbound-adapter-v1 manifest");
+    }
+    this.manifest = manifest;
     this.#tokenProvider = options.tokenProvider;
     this.#authority = options.authority;
     this.#fetch = options.fetch ?? globalThis.fetch;
@@ -275,79 +265,376 @@ export class GitHubAppAdapter implements OutboundAdapterV1 {
     if (expectedPayloadDigest !== request.payloadDigest)
       throw new Error("GitHub payload digest does not match");
     this.#validatePayloadContent(payload);
-    await this.#authority.authorize(request);
     try {
       const token = await this.#tokenProvider.getToken();
+      const observation = await this.#observe(owner, repo, payload, request.effectKey, token);
+      if (observation.status === "observed_conflict") {
+        throw new Error("GitHub live state conflicts with the requested idempotent effect");
+      }
+      await this.#authority.authorize(request);
+      if (
+        observation.status === "observed_exact" &&
+        observation.externalId &&
+        observation.observedStateDigest &&
+        observation.resourceUrl
+      ) {
+        const receipt = this.#receipt(
+          request,
+          observation.externalId,
+          observation.requestId,
+          observation.observedStateDigest
+        );
+        await this.#authority.recordReceipt(request, receipt);
+        this.#effects.set(request.effectKey, {
+          receipt,
+          resourceUrl: observation.resourceUrl
+        });
+        return receipt;
+      }
       const effect = await this.#perform(owner, repo, payload, request.effectKey, token);
-      const acceptedAt = this.#clock.now().toISOString();
-      const unsigned = {
-        schemaVersion: 1 as const,
-        adapterId: this.manifest.id,
-        effectKey: request.effectKey,
-        action: request.action,
-        payloadDigest: request.payloadDigest,
-        externalId: effect.externalId,
-        requestId: effect.requestId,
-        observedStateDigest: effect.observedStateDigest,
-        acceptedAt
-      };
-      const receipt = OutboundEffectReceiptV1Schema.parse({
-        ...unsigned,
-        receiptDigest: sha256(canonical(unsigned))
-      });
+      const postState = await this.#observe(owner, repo, payload, request.effectKey, token);
+      if (
+        postState.status !== "observed_exact" ||
+        !postState.externalId ||
+        !postState.observedStateDigest ||
+        !postState.resourceUrl
+      ) {
+        throw new Error("GitHub post-effect state did not match the exact requested effect");
+      }
+      const receipt = this.#receipt(
+        request,
+        postState.externalId,
+        effect.requestId,
+        postState.observedStateDigest
+      );
       await this.#authority.recordReceipt(request, receipt);
-      this.#effects.set(request.effectKey, { receipt, resourceUrl: effect.resourceUrl });
+      this.#effects.set(request.effectKey, { receipt, resourceUrl: postState.resourceUrl });
       return receipt;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const status = /with ([0-9]{3})/.exec(reason)?.[1];
       const retryable =
-        status === undefined ||
-        status === "408" ||
-        status === "409" ||
-        status === "429" ||
-        status.startsWith("5");
+        !/conflicts|Only a ParallelPlay-managed|authority ceiling|payload|secret|mention|slash command|active HTML|image|non-allowlisted/i.test(
+          reason
+        ) &&
+        (status === undefined ||
+          status === "408" ||
+          status === "409" ||
+          status === "429" ||
+          status.startsWith("5"));
       await this.#authority.recordFailure(request, { retryable, reason });
       throw error;
     }
   }
 
-  async reconcile(effectKey: string): Promise<OutboundReconciliationV1> {
-    const effect = this.#effects.get(effectKey);
-    if (!effect) {
-      return {
-        schemaVersion: 1,
-        effectKey,
-        status: "not_observed",
-        externalId: null,
-        observedStateDigest: null
-      };
-    }
+  async reconcile(rawRequest: OutboundReconcileRequestV1): Promise<OutboundReconciliationV1> {
+    const request = OutboundReconcileRequestV1Schema.parse(rawRequest);
+    const effectKey = request.effect.effectKey;
+    const target = RepositoryTargetSchema.parse(request.effect.target);
+    const [owner, repo] = target.split("/") as [string, string];
+    const payload = GitHubPayloadSchema.parse(request.effect.payload);
+    if (payload.action !== request.effect.action)
+      throw new Error("GitHub reconciliation payload action does not match request");
     const token = await this.#tokenProvider.getToken();
-    const response = await this.#request(effect.resourceUrl, token, { method: "GET" });
-    if (response.status === 404) {
-      return {
-        schemaVersion: 1,
-        effectKey,
-        status: "not_observed",
-        externalId: null,
-        observedStateDigest: null
-      };
-    }
-    if (!response.ok)
-      throw new Error(`GitHub reconciliation failed with ${String(response.status)}`);
-    const observedStateDigest = sha256(canonical(await response.json()));
+    const observation = await this.#observe(owner, repo, payload, effectKey, token);
     return {
       schemaVersion: 1,
       effectKey,
-      status: "observed_exact",
-      externalId: effect.receipt.externalId,
-      observedStateDigest
+      status: observation.status,
+      externalId: observation.externalId,
+      observedStateDigest: observation.observedStateDigest
     };
   }
 
   async close(): Promise<void> {
     this.#effects.clear();
+  }
+
+  #receipt(
+    request: OutboundEffectRequestV1,
+    externalId: string,
+    requestId: string | null,
+    observedStateDigest: string
+  ): OutboundEffectReceiptV1 {
+    const unsigned = {
+      schemaVersion: 1 as const,
+      adapterId: this.manifest.id,
+      effectKey: request.effectKey,
+      action: request.action,
+      payloadDigest: request.payloadDigest,
+      externalId,
+      requestId,
+      observedStateDigest,
+      acceptedAt: this.#clock.now().toISOString()
+    };
+    return OutboundEffectReceiptV1Schema.parse({
+      ...unsigned,
+      receiptDigest: sha256(canonical(unsigned))
+    });
+  }
+
+  async #observe(
+    owner: string,
+    repo: string,
+    payload: GitHubEffectPayload,
+    effectKey: string,
+    token: string
+  ): Promise<LiveObservation> {
+    const root = `${this.#apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+    const marker = `<!-- parallelplay-effect:${effectKey} -->`;
+    const managedMarker = "<!-- parallelplay-managed -->";
+    switch (payload.action) {
+      case "github.check.upsert": {
+        const response = await this.#request(
+          `${root}/commits/${encodeURIComponent(payload.headSha)}/check-runs?per_page=100`,
+          token,
+          { method: "GET" }
+        );
+        if (response.status === 404) return this.#notObserved();
+        if (!response.ok)
+          throw new Error(`GitHub check reconciliation failed with ${String(response.status)}`);
+        const result = z
+          .looseObject({
+            check_runs: z.array(
+              z.looseObject({
+                url: z.url(),
+                external_id: z.string().nullable(),
+                name: z.string(),
+                head_sha: z.string(),
+                status: z.string(),
+                conclusion: z.string().nullable(),
+                output: z
+                  .looseObject({ title: z.string().nullable(), summary: z.string().nullable() })
+                  .optional()
+              })
+            )
+          })
+          .parse(await response.json());
+        const check = result.check_runs.find((entry) => entry.external_id === effectKey);
+        if (!check) return this.#notObserved();
+        const state = {
+          externalId: check.external_id,
+          name: check.name,
+          headSha: check.head_sha,
+          status: check.status,
+          conclusion: check.conclusion,
+          title: check.output?.title ?? null,
+          summary: check.output?.summary ?? null
+        };
+        const exact =
+          check.name === payload.name &&
+          check.head_sha === payload.headSha &&
+          check.status === payload.status &&
+          (payload.status !== "completed" || check.conclusion === payload.conclusion) &&
+          check.output?.title === payload.title &&
+          check.output.summary === payload.summary;
+        return this.#observed(exact, check.url, state, response);
+      }
+      case "github.label.upsert": {
+        const labelUrl = `${root}/labels/${encodeURIComponent(payload.label)}`;
+        const labelResponse = await this.#request(labelUrl, token, { method: "GET" });
+        if (labelResponse.status === 404) return this.#notObserved();
+        if (!labelResponse.ok)
+          throw new Error(
+            `GitHub label reconciliation failed with ${String(labelResponse.status)}`
+          );
+        const label = z
+          .looseObject({ name: z.string(), color: z.string(), url: z.url() })
+          .parse(await labelResponse.json());
+        if (
+          label.name !== payload.label ||
+          label.color.toLowerCase() !== payload.color.toLowerCase()
+        ) {
+          return this.#observed(false, label.url, { label }, labelResponse);
+        }
+        const issueLabels = await this.#list(
+          `${root}/issues/${String(payload.issueNumber)}/labels?per_page=100`,
+          token
+        );
+        const associated = issueLabels.values.some(
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            (value as Record<string, unknown>)["name"] === payload.label
+        );
+        if (!associated) return this.#notObserved();
+        const state = {
+          label: payload.label,
+          color: label.color.toLowerCase(),
+          issueNumber: payload.issueNumber,
+          associated
+        };
+        return this.#observed(true, label.url, state, labelResponse);
+      }
+      case "github.comment.create": {
+        const expectedBody = `${validateGeneratedGitHubText(payload.body, payload.allowedLinkHosts)}\n\n${marker}`;
+        const comments = await this.#list(
+          `${root}/issues/${String(payload.issueNumber)}/comments?per_page=100`,
+          token
+        );
+        const comment = comments.values
+          .map((value) => z.looseObject({ url: z.url(), body: z.string() }).safeParse(value))
+          .find((result) => result.success && result.data.body.includes(marker));
+        if (!comment?.success) return this.#notObserved();
+        return this.#observed(
+          comment.data.body === expectedBody,
+          comment.data.url,
+          { issueNumber: payload.issueNumber, body: comment.data.body },
+          null,
+          comments.requestId
+        );
+      }
+      case "github.candidate-branch.create": {
+        const branch = `parallelplay/candidate/${payload.revisionDigest}`;
+        const encodedRef = `heads/${branch.split("/").map(encodeURIComponent).join("/")}`;
+        const response = await this.#request(`${root}/git/ref/${encodedRef}`, token, {
+          method: "GET"
+        });
+        if (response.status === 404) return this.#notObserved();
+        if (!response.ok)
+          throw new Error(`GitHub branch reconciliation failed with ${String(response.status)}`);
+        const ref = z
+          .looseObject({
+            ref: z.string(),
+            url: z.url(),
+            object: z.looseObject({ sha: z.string() })
+          })
+          .parse(await response.json());
+        const state = { ref: ref.ref, commitSha: ref.object.sha };
+        return this.#observed(ref.object.sha === payload.commitSha, ref.url, state, response);
+      }
+      case "github.draft-pr.create": {
+        const branch = `parallelplay/candidate/${payload.revisionDigest}`;
+        const query = new URLSearchParams({
+          state: "all",
+          head: `${owner}:${branch}`,
+          base: payload.base,
+          per_page: "100"
+        });
+        const pulls = await this.#list(`${root}/pulls?${query.toString()}`, token);
+        const parsed = pulls.values
+          .map((value) =>
+            z
+              .looseObject({
+                url: z.url(),
+                title: z.string(),
+                body: z.string().nullable(),
+                draft: z.boolean(),
+                merged_at: z.string().nullable().optional(),
+                head: z.looseObject({ ref: z.string() }),
+                base: z.looseObject({ ref: z.string() })
+              })
+              .safeParse(value)
+          )
+          .filter((result) => result.success);
+        const pull = parsed.find((result) => result.data.body?.includes(marker));
+        const sameHead = parsed.find(
+          (result) => result.data.head.ref === branch && result.data.base.ref === payload.base
+        );
+        if (!pull && !sameHead) return this.#notObserved();
+        const candidate = (pull ?? sameHead)?.data;
+        if (!candidate) return this.#notObserved();
+        const expectedBody = `${validateGeneratedGitHubText(payload.body, payload.allowedLinkHosts)}\n\n${managedMarker}\n${marker}`;
+        const exact =
+          candidate.title === payload.title &&
+          candidate.body === expectedBody &&
+          candidate.draft &&
+          !candidate.merged_at &&
+          candidate.head.ref === branch &&
+          candidate.base.ref === payload.base;
+        return this.#observed(
+          exact,
+          candidate.url,
+          { title: candidate.title, body: candidate.body, draft: candidate.draft, branch },
+          null,
+          pulls.requestId
+        );
+      }
+      case "github.draft-pr.update": {
+        const response = await this.#request(`${root}/pulls/${String(payload.pullNumber)}`, token, {
+          method: "GET"
+        });
+        if (response.status === 404) return this.#notObserved();
+        if (!response.ok)
+          throw new Error(`GitHub pull reconciliation failed with ${String(response.status)}`);
+        const pull = z
+          .looseObject({
+            url: z.url(),
+            title: z.string(),
+            body: z.string().nullable(),
+            draft: z.boolean(),
+            merged: z.boolean(),
+            head: z.looseObject({ ref: z.string() })
+          })
+          .parse(await response.json());
+        if (
+          !pull.body?.includes(managedMarker) ||
+          !pull.head.ref.startsWith("parallelplay/candidate/")
+        ) {
+          return this.#observed(false, pull.url, pull, response);
+        }
+        const expectedBody = `${validateGeneratedGitHubText(payload.body, payload.allowedLinkHosts)}\n\n${managedMarker}\n${marker}`;
+        if (!pull.body.includes(marker)) return this.#notObserved();
+        const exact =
+          pull.title === payload.title && pull.body === expectedBody && pull.draft && !pull.merged;
+        return this.#observed(exact, pull.url, pull, response);
+      }
+    }
+  }
+
+  #notObserved(): LiveObservation {
+    return {
+      status: "not_observed",
+      externalId: null,
+      observedStateDigest: null,
+      resourceUrl: null,
+      requestId: null
+    };
+  }
+
+  #observed(
+    exact: boolean,
+    externalId: string,
+    state: unknown,
+    response: Response | null,
+    requestId = response?.headers.get("x-github-request-id") ?? null
+  ): LiveObservation {
+    return {
+      status: exact ? "observed_exact" : "observed_conflict",
+      externalId,
+      observedStateDigest: sha256(canonical(state)),
+      resourceUrl: externalId,
+      requestId
+    };
+  }
+
+  async #list(
+    initialUrl: string,
+    token: string
+  ): Promise<{ values: unknown[]; requestId: string | null }> {
+    const values: unknown[] = [];
+    let url: string | null = initialUrl;
+    let requestId: string | null = null;
+    for (let page = 0; url && page < 10; page += 1) {
+      const response = await this.#request(url, token, { method: "GET" });
+      if (!response.ok)
+        throw new Error(`GitHub list reconciliation failed with ${String(response.status)}`);
+      requestId ??= response.headers.get("x-github-request-id");
+      const body = z.array(z.unknown()).parse(await response.json());
+      values.push(...body);
+      const next = /<([^>]+)>;\s*rel="next"/.exec(response.headers.get("link") ?? "")?.[1];
+      if (next) {
+        const candidate = new URL(next);
+        const base = new URL(this.#apiBaseUrl);
+        if (candidate.origin !== base.origin)
+          throw new Error("GitHub pagination escaped the API origin");
+        url = candidate.href;
+      } else {
+        url = null;
+      }
+    }
+    if (url) throw new Error("GitHub reconciliation exceeded the pagination bound");
+    return { values, requestId };
   }
 
   async #perform(
@@ -419,7 +706,7 @@ export class GitHubAppAdapter implements OutboundAdapterV1 {
         break;
       }
       case "github.draft-pr.create": {
-        const body = `${validateGeneratedGitHubText(payload.body, payload.allowedLinkHosts)}\n\n<!-- parallelplay-effect:${effectKey} -->`;
+        const body = `${validateGeneratedGitHubText(payload.body, payload.allowedLinkHosts)}\n\n<!-- parallelplay-managed -->\n<!-- parallelplay-effect:${effectKey} -->`;
         response = await this.#request(`${root}/pulls`, token, {
           method: "POST",
           body: {
@@ -440,11 +727,22 @@ export class GitHubAppAdapter implements OutboundAdapterV1 {
         if (!current.ok)
           throw new Error(`GitHub pull lookup failed with ${String(current.status)}`);
         const currentValue = z
-          .looseObject({ draft: z.boolean(), merged: z.boolean() })
+          .looseObject({
+            draft: z.boolean(),
+            merged: z.boolean(),
+            body: z.string().nullable(),
+            head: z.looseObject({ ref: z.string() })
+          })
           .parse(await current.json());
-        if (!currentValue.draft || currentValue.merged)
-          throw new Error("Only an open draft pull request may be updated");
-        const body = `${validateGeneratedGitHubText(payload.body, payload.allowedLinkHosts)}\n\n<!-- parallelplay-effect:${effectKey} -->`;
+        if (
+          !currentValue.draft ||
+          currentValue.merged ||
+          !currentValue.body?.includes("<!-- parallelplay-managed -->") ||
+          !currentValue.head.ref.startsWith("parallelplay/candidate/")
+        ) {
+          throw new Error("Only a ParallelPlay-managed open draft pull request may be updated");
+        }
+        const body = `${validateGeneratedGitHubText(payload.body, payload.allowedLinkHosts)}\n\n<!-- parallelplay-managed -->\n<!-- parallelplay-effect:${effectKey} -->`;
         response = await this.#request(`${root}/pulls/${String(payload.pullNumber)}`, token, {
           method: "PATCH",
           body: { title: payload.title, body }
@@ -454,14 +752,14 @@ export class GitHubAppAdapter implements OutboundAdapterV1 {
     }
     if (!response.ok) throw new Error(`GitHub effect failed with ${String(response.status)}`);
     const observed = (await response.json()) as Record<string, unknown>;
-    const externalIdValue = observed["id"] ?? observed["node_id"] ?? observed["ref"];
-    const externalId =
-      typeof externalIdValue === "string" || typeof externalIdValue === "number"
-        ? String(externalIdValue)
-        : effectKey;
-    const resourceUrl = typeof observed["url"] === "string" ? observed["url"] : root;
+    const resourceUrl =
+      typeof observed["url"] === "string"
+        ? observed["url"]
+        : payload.action === "github.label.upsert"
+          ? `${root}/labels/${encodeURIComponent(payload.label)}`
+          : root;
     return {
-      externalId,
+      externalId: resourceUrl,
       requestId: response.headers.get("x-github-request-id"),
       observedStateDigest: sha256(canonical(observed)),
       resourceUrl

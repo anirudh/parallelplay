@@ -1,4 +1,20 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+    .join(",")}}`;
+}
+
+export function outboundReceiptDigest(
+  receipt: Omit<OutboundEffectReceiptV1, "receiptDigest">
+): string {
+  return createHash("sha256").update(canonicalJson(receipt)).digest("hex");
+}
 
 export const IdentifierSchema = z
   .string()
@@ -485,13 +501,47 @@ export const OutboundReconciliationV1Schema = z.strictObject({
   externalId: z.string().trim().min(1).max(1000).nullable(),
   observedStateDigest: DigestSchema.nullable()
 });
+export const OutboundReconcileRequestV1Schema = z
+  .strictObject({
+    schemaVersion: z.literal(1),
+    effect: OutboundEffectRequestV1Schema,
+    priorReceipt: OutboundEffectReceiptV1Schema.nullable()
+  })
+  .superRefine((request, context) => {
+    const receipt = request.priorReceipt;
+    if (!receipt) return;
+    const bindings = [
+      ["adapterId", receipt.adapterId, request.effect.adapterId],
+      ["effectKey", receipt.effectKey, request.effect.effectKey],
+      ["action", receipt.action, request.effect.action],
+      ["payloadDigest", receipt.payloadDigest, request.effect.payloadDigest]
+    ] as const;
+    for (const [field, actual, expected] of bindings) {
+      if (actual !== expected) {
+        context.addIssue({
+          code: "custom",
+          path: ["priorReceipt", field],
+          message: `Prior receipt ${field} is not bound to the requested effect`
+        });
+      }
+    }
+    const { receiptDigest, ...unsigned } = receipt;
+    if (outboundReceiptDigest(unsigned) !== receiptDigest) {
+      context.addIssue({
+        code: "custom",
+        path: ["priorReceipt", "receiptDigest"],
+        message: "Prior receipt digest is invalid"
+      });
+    }
+  });
 export type OutboundEffectRequestV1 = z.infer<typeof OutboundEffectRequestV1Schema>;
 export type OutboundEffectReceiptV1 = z.infer<typeof OutboundEffectReceiptV1Schema>;
+export type OutboundReconcileRequestV1 = z.infer<typeof OutboundReconcileRequestV1Schema>;
 export type OutboundReconciliationV1 = z.infer<typeof OutboundReconciliationV1Schema>;
 export interface OutboundAdapterV1 {
   readonly manifest: ExtensionManifestV1;
   deliver(request: OutboundEffectRequestV1): Promise<OutboundEffectReceiptV1>;
-  reconcile(effectKey: string): Promise<OutboundReconciliationV1>;
+  reconcile(request: OutboundReconcileRequestV1): Promise<OutboundReconciliationV1>;
   close(): Promise<void>;
 }
 

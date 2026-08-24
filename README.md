@@ -64,6 +64,16 @@ Explorer opens SQLite read-only with `query_only` and exposes GET routes only. A
 
 The separate [`parallelplay-fixture`](https://github.com/anirudh/parallelplay-fixture) repository is synthetic and credential-free. Its fixed commits, milestones, candidate manifests, and failure cases are the public conformance target. A clean release install must complete the generic-command program, verify the candidate, produce an outcome packet, render both UI views, and rebuild byte-identical projections without provider access.
 
+After extracting a CLI release archive beside a clean fixture checkout, run:
+
+```sh
+bin/parallelplay-keyless-pilot \
+  --fixture <parallelplay-fixture-checkout> \
+  --output keyless-pilot.json
+```
+
+The pilot fails if the fixture tree is dirty and emits only source/image, graph, packet, projection, timing, and UI-status evidence.
+
 ## Provider drivers
 
 The Codex and Claude drivers use pinned SDK versions and structured SDK streams. They refuse to initialize unless the contained-runner boundary is asserted. A host-trusted broker resolves named environment secrets, issues short-lived run-bound handles, restricts provider/model/path/rate/body/budget, and injects the long-lived provider credential only at the outbound relay.

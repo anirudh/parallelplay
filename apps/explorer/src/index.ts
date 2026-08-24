@@ -10,6 +10,7 @@ import {
   getArtifactStoreStatus,
   getSourceStoreStatus
 } from "@parallelplay/runtime";
+import { renderAppShell, SHARED_STYLES, type ExtensionConformanceViewV1 } from "@parallelplay/ui";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -20,7 +21,7 @@ const CLIENT = existsSync(clientPath)
 const CSP = [
   "default-src 'none'",
   "script-src 'self'",
-  "style-src 'unsafe-inline'",
+  "style-src 'self'",
   "connect-src 'self'",
   "img-src 'self' data:",
   "base-uri 'none'",
@@ -28,19 +29,13 @@ const CSP = [
   "frame-ancestors 'none'"
 ].join("; ");
 
-const HTML = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ParallelPlay execution explorer</title>
-  <style>
-    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; line-height: 1.5; }
-    body { margin: 0; background: #10131a; color: #f4f6fb; }
-    header.site { padding: 2rem max(1.25rem, 5vw); border-bottom: 1px solid #343b4b; background: #171c26; }
-    header.site h1 { margin: 0; font-size: clamp(1.6rem, 4vw, 2.5rem); }
-    header.site p { max-width: 65ch; color: #bdc5d6; }
-    main { max-width: 76rem; margin: 0 auto; padding: 1.5rem; }
+const MAIN = `
+    <p id="refresh-status" role="status" aria-live="polite">Loading authoritative snapshot…</p>
+    <section id="portfolio" aria-label="Portfolio"></section>
+    <section id="advisor" aria-label="Advisor authority"></section>
+    <section id="milestones" aria-label="Milestones"></section>`;
+
+const STYLE = `${SHARED_STYLES}
     #refresh-status { display: inline-block; margin-bottom: 1rem; color: #bdc5d6; }
     .milestone-card { border: 1px solid #3a4356; border-radius: .75rem; background: #181e29; padding: 1.25rem; margin-bottom: 1rem; box-shadow: 0 .5rem 1.5rem #0004; }
     .card-header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
@@ -56,31 +51,17 @@ const HTML = `<!doctype html>
     .outcome { border-left: .3rem solid #8ecbff; padding-left: 1rem; margin: 1rem 0; }
     a { color: #9fd4ff; text-underline-offset: .2rem; }
     .secondary-link { display: inline-block; margin-top: .5rem; }
-    :focus-visible { outline: .2rem solid #ffd166; outline-offset: .2rem; }
     .empty-state { padding: 2rem; border: 1px dashed #56617a; border-radius: .75rem; }
     @media (max-width: 40rem) { .card-header { display: block; } .status { display: inline-block; margin-bottom: 1rem; } }
-  </style>
-</head>
-<body>
-  <header class="site">
-    <h1>ParallelPlay execution explorer</h1>
-    <p>Read-only local evidence for program graphs, milestone generations, routed issues, verification, candidate lineage, and measurements.</p>
-  </header>
-  <main>
-    <p id="refresh-status" role="status" aria-live="polite">Loading authoritative snapshot…</p>
-    <section id="portfolio" aria-label="Portfolio"></section>
-    <section id="advisor" aria-label="Advisor authority"></section>
-    <section id="milestones" aria-label="Milestones"></section>
-  </main>
-  <script type="module" src="/assets/client.js"></script>
-</body>
-</html>`;
+`;
 
 export interface ExplorerServerOptions {
   databasePath: string;
   sourceRoot: string;
   artifactRoot: string;
   port?: number;
+  attentionUrl?: string;
+  extensions?: readonly ExtensionConformanceViewV1[];
 }
 
 export interface ExplorerServer {
@@ -172,6 +153,20 @@ export async function startExplorerServer(options: ExplorerServerOptions): Promi
   }
   const kernel = await openReadOnlyKernel({ databasePath: options.databasePath });
   const artifactStore = new FileArtifactStore(options.artifactRoot);
+  const html = renderAppShell({
+    surface: "explorer",
+    title: "Execution Explorer",
+    documentTitle: "ParallelPlay execution explorer",
+    eyebrow: "Read-only local evidence",
+    description:
+      "Program graphs, milestone generations, verification, candidate lineage, and measurements.",
+    main: MAIN,
+    scriptPath: "/assets/client.js",
+    ...(options.attentionUrl
+      ? { peer: { label: "Open Attention", url: options.attentionUrl } }
+      : {}),
+    extensions: options.extensions ?? []
+  });
   const server = createServer((request, response) => {
     void (async () => {
       if (request.method !== "GET") {
@@ -182,7 +177,12 @@ export async function startExplorerServer(options: ExplorerServerOptions): Promi
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (url.pathname === "/") {
         response.writeHead(200, securityHeaders("text/html; charset=utf-8"));
-        response.end(HTML);
+        response.end(html);
+        return;
+      }
+      if (url.pathname === "/assets/style.css") {
+        response.writeHead(200, securityHeaders("text/css; charset=utf-8"));
+        response.end(STYLE);
         return;
       }
       if (url.pathname === "/assets/client.js") {

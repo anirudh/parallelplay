@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@parallelplay/kernel": "workspace:*",
-    "@parallelplay/runtime": "workspace:*"
+    "@parallelplay/runtime": "workspace:*",
+    "@parallelplay/ui": "workspace:*"
   }
 }

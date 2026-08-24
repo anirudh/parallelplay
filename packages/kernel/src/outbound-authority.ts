@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
 import {
   AutomaticActionKindSchema,
+  ExtensionManifestV1Schema,
+  OutboundReconcileRequestV1Schema,
+  OutboundReconciliationV1Schema,
   OutboundEffectReceiptV1Schema,
   OutboundEffectRequestV1Schema,
   isAutomaticActionAllowed,
   type AutomaticActionKind,
+  type OutboundAdapterV1,
   type OutboundAuthorityV1,
   type OutboundEffectReceiptV1,
-  type OutboundEffectRequestV1
+  type OutboundEffectRequestV1,
+  type OutboundReconciliationV1
 } from "@parallelplay/contracts";
 import { z } from "zod";
 import { canonicalDigest, canonicalJson } from "./canonical.js";
@@ -481,6 +486,48 @@ export class SqliteOutboundAuthority implements OutboundAuthorityV1 {
       this.#database.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  async reconcileEffect(
+    rawEffectKey: string,
+    adapter: OutboundAdapterV1
+  ): Promise<OutboundReconciliationV1> {
+    this.#assertOpen();
+    const effectKey = z.string().trim().min(1).max(500).parse(rawEffectKey);
+    const manifest = ExtensionManifestV1Schema.parse(adapter.manifest);
+    const state = replay(loadEvents(this.#database));
+    const effect = state.effects.get(effectKey);
+    if (!effect) throw new Error("Outbound reconciliation references an unknown effect");
+    if (effect.status === "failed") {
+      throw new Error("Terminally failed outbound effects cannot be reconciled");
+    }
+    if (
+      manifest.kind !== "adapter" ||
+      manifest.contract.name !== "outbound-adapter-v1" ||
+      manifest.id !== effect.request.adapterId
+    ) {
+      throw new Error("Outbound reconciliation adapter identity does not match the effect");
+    }
+    if (canonicalDigest(effect.request) !== effect.requestDigest) {
+      throw new Error("Outbound reconciliation request digest drift");
+    }
+    const request = OutboundReconcileRequestV1Schema.parse({
+      schemaVersion: 1,
+      effect: effect.request,
+      priorReceipt: effect.receipt
+    });
+    const result = OutboundReconciliationV1Schema.parse(await adapter.reconcile(request));
+    if (result.effectKey !== effectKey) {
+      throw new Error("Outbound reconciliation result does not match the effect key");
+    }
+    if (
+      result.status === "observed_exact" &&
+      effect.receipt &&
+      result.observedStateDigest !== effect.receipt.observedStateDigest
+    ) {
+      throw new Error("Outbound reconciliation exact state conflicts with the prior receipt");
+    }
+    return result;
   }
 
   snapshot(): OutboundAuthoritySnapshotV1 {

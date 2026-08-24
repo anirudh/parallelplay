@@ -9,7 +9,8 @@ const ignoredDirectories = new Set([
   "dist",
   "coverage",
   ".parallelplay-release",
-  ".parallelplay-conformance"
+  ".parallelplay-conformance",
+  ".parallelplay-provider-images"
 ]);
 const forbiddenNames = [["staff", "plane"].join(""), ["hob", "bes"].join("")];
 const failures = [];

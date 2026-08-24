@@ -1,8 +1,38 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ExtensionManifestV1 } from "@parallelplay/contracts";
 import { describe, expect, it } from "vitest";
 import { ClaudeSdkDriver } from "./index.js";
+
+function claudeManifest(digest: string): ExtensionManifestV1 {
+  return {
+    schemaVersion: 1,
+    id: "claude-agent-sdk",
+    displayName: "Claude Agent SDK",
+    extensionVersion: "0.1.0",
+    kind: "driver",
+    contract: { name: "agent-driver-v1", version: 1 },
+    artifact: {
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      reference: `claude@sha256:${digest}`,
+      sha256: digest
+    },
+    configurationSchemaDigest: "b".repeat(64),
+    capabilities: [],
+    provenance: {
+      sourceRepository: "https://github.com/anirudh/parallelplay",
+      sourceRevision: "c".repeat(64),
+      sbomDigest: "d".repeat(64),
+      attestationDigest: "e".repeat(64)
+    },
+    conformance: {
+      suiteVersion: "0.1.0",
+      reportDigest: "f".repeat(64),
+      approvedRegistryDigest: null
+    }
+  };
+}
 
 async function eventually<T>(operation: () => Promise<T>): Promise<T> {
   let last: unknown;
@@ -66,7 +96,7 @@ describe("Claude Agent SDK driver", () => {
     expect(
       () =>
         new ClaudeSdkDriver({
-          image: `claude@sha256:${"a".repeat(64)}`,
+          manifest: claudeManifest("a".repeat(64)),
           brokerBaseUrl: "http://broker",
           brokerToken: "grant",
           environment: {}
@@ -77,14 +107,28 @@ describe("Claude Agent SDK driver", () => {
   it("normalizes structured SDK messages into a digest-bound receipt", async () => {
     const sessionDirectory = await mkdtemp(join(tmpdir(), "parallelplay-claude-"));
     const driver = new ClaudeSdkDriver({
-      image: `claude@sha256:${"a".repeat(64)}`,
+      manifest: claudeManifest("a".repeat(64)),
       brokerBaseUrl: "http://broker",
       brokerToken: "grant",
       sessionDirectory,
       environment: { PARALLELPLAY_OCI_BOUNDARY: "1" },
       queryFactory: () =>
         fakeQuery([
-          { type: "system", subtype: "init", session_id: "session-1", model: "claude-test" },
+          {
+            type: "system",
+            subtype: "init",
+            session_id: "session-1",
+            uuid: "message-1",
+            model: "claude-test",
+            permissionMode: "dontAsk"
+          },
+          {
+            type: "system",
+            subtype: "status",
+            status: "requesting",
+            session_id: "session-1",
+            uuid: "message-2"
+          },
           {
             type: "result",
             subtype: "success",
@@ -103,7 +147,8 @@ describe("Claude Agent SDK driver", () => {
               }
             },
             permission_denials: [],
-            session_id: "session-1"
+            session_id: "session-1",
+            uuid: "message-3"
           }
         ])
     });
@@ -128,14 +173,21 @@ describe("Claude Agent SDK driver", () => {
   it("routes permission denials to an authority-required terminal", async () => {
     const sessionDirectory = await mkdtemp(join(tmpdir(), "parallelplay-claude-denied-"));
     const driver = new ClaudeSdkDriver({
-      image: `claude@sha256:${"b".repeat(64)}`,
+      manifest: claudeManifest("b".repeat(64)),
       brokerBaseUrl: "http://broker",
       brokerToken: "grant",
       sessionDirectory,
       environment: { PARALLELPLAY_OCI_BOUNDARY: "1" },
       queryFactory: () =>
         fakeQuery([
-          { type: "system", subtype: "init", session_id: "session-2", model: "claude-test" },
+          {
+            type: "system",
+            subtype: "init",
+            session_id: "session-2",
+            uuid: "message-1",
+            model: "claude-test",
+            permissionMode: "dontAsk"
+          },
           {
             type: "result",
             subtype: "success",
@@ -143,7 +195,8 @@ describe("Claude Agent SDK driver", () => {
             total_cost_usd: 0,
             modelUsage: {},
             permission_denials: [{ tool_name: "WebFetch" }],
-            session_id: "session-2"
+            session_id: "session-2",
+            uuid: "message-2"
           }
         ])
     });
@@ -156,5 +209,29 @@ describe("Claude Agent SDK driver", () => {
       afterSequence: 0
     });
     expect(inspection.events.map((event) => event.type)).toContain("approval.requested");
+  });
+
+  it("fails closed on malformed provider messages without retaining provider text", async () => {
+    const sessionDirectory = await mkdtemp(join(tmpdir(), "parallelplay-claude-malformed-"));
+    const driver = new ClaudeSdkDriver({
+      manifest: claudeManifest("c".repeat(64)),
+      brokerBaseUrl: "http://broker",
+      brokerToken: "grant",
+      sessionDirectory,
+      environment: { PARALLELPLAY_OCI_BOUNDARY: "1" },
+      queryFactory: () =>
+        fakeQuery([
+          {
+            type: "system",
+            subtype: "unknown-provider-message",
+            secret: ["do", "not", "retain"].join("-")
+          }
+        ])
+    });
+    const session = await driver.start(launch);
+    const receipt = await eventually(() => driver.collectReceipt(session.sessionId));
+    expect(receipt.outcome).toBe("protocol_invalid");
+    expect(receipt.terminalReason).toBe("provider_event_protocol_invalid");
+    expect(JSON.stringify(receipt)).not.toContain("do-not-retain");
   });
 });

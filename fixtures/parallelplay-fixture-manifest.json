@@ -17,8 +17,17 @@
     "/protocol/approval.sh",
     "/protocol/missing-terminal.sh",
     "/protocol/malformed.sh",
-    "/protocol/capability-violation.sh"
+    "/protocol/capability-violation.sh",
+    "/protocol/success-v2.sh"
   ],
+  "adversarialFixtures": [
+    "/protocol/duplicate-sequence.sh",
+    "/protocol/network-probe.sh",
+    "/protocol/oversized-event.sh",
+    "/protocol/secret-probe.sh",
+    "/protocol/timeout.sh"
+  ],
+  "crashBoundaryFixtures": ["/protocol/crash-after-artifact.sh"],
   "networkRequired": false,
   "credentialsRequired": false
 }

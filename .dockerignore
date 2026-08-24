@@ -1,0 +1,12 @@
+.git
+.github
+.parallelplay-release
+.parallelplay-provider-images
+.parallelplay-conformance
+.parallelplay-sandbox-image
+**/dist
+**/node_modules
+**/*.test.ts
+**/*.integration.test.ts
+**/*.tsbuildinfo
+docs

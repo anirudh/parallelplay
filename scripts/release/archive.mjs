@@ -134,8 +134,8 @@ function readNullTerminated(buffer) {
   return buffer.subarray(0, zero < 0 ? buffer.length : zero).toString("utf8");
 }
 
-export function readTarGz(bytes) {
-  const tar = gunzipSync(bytes);
+export function readTar(bytes) {
+  const tar = bytes;
   const entries = [];
   let offset = 0;
   let pax = {};
@@ -173,4 +173,8 @@ export function readTarGz(bytes) {
     pax = {};
   }
   return entries;
+}
+
+export function readTarGz(bytes) {
+  return readTar(gunzipSync(bytes));
 }

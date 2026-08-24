@@ -3,7 +3,9 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 const directory = resolve(process.argv[2] ?? "release-assets");
-const version = "0.1.0";
+const version = process.env.PARALLELPLAY_RELEASE_VERSION ?? "0.1.0";
+const releaseTag = process.env.PARALLELPLAY_RELEASE_TAG ?? `v${version}`;
+if (!/^0\.1\.0(?:-rc\.[1-9][0-9]*)?$/.test(version)) throw new Error("Invalid release version");
 const epoch = Number(process.env.SOURCE_DATE_EPOCH ?? "1767225600");
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const canonical = (value) => {
@@ -15,11 +17,17 @@ const canonical = (value) => {
     .join(",")}}`;
 };
 
-const initialFiles = readdirSync(directory)
-  .filter((name) => !["SHA256SUMS", "build-manifest.json"].includes(name))
+const initialFiles = readdirSync(directory, { withFileTypes: true })
+  .filter((entry) => entry.isFile() && !["SHA256SUMS", "build-manifest.json"].includes(entry.name))
+  .map((entry) => entry.name)
   .sort();
 const cliPlatforms = initialFiles
-  .map((name) => /^parallelplay-cli-0\.1\.0-(.+)\.tar\.gz$/.exec(name)?.[1])
+  .map(
+    (name) =>
+      new RegExp(`^parallelplay-cli-${version.replaceAll(".", "\\.")}-(.+)\\.tar\\.gz$`).exec(
+        name
+      )?.[1]
+  )
   .filter(Boolean)
   .sort();
 if (JSON.stringify(cliPlatforms) !== JSON.stringify(["linux-arm64", "linux-x64", "macos-arm64"])) {
@@ -27,7 +35,7 @@ if (JSON.stringify(cliPlatforms) !== JSON.stringify(["linux-arm64", "linux-x64",
 }
 
 const artifacts = initialFiles
-  .filter((name) => /\.(?:tgz|tar\.gz)$/.test(name))
+  .filter((name) => /\.(?:tgz|tar\.gz|oci\.tar)$/.test(name))
   .map((name) => {
     const bytes = readFileSync(join(directory, name));
     return { name, sha256: sha256(bytes), size: bytes.length };
@@ -35,6 +43,7 @@ const artifacts = initialFiles
 const manifest = {
   schemaVersion: 1,
   version,
+  releaseTag,
   sourceDateEpoch: epoch,
   node: "22.17.1+",
   pnpm: "11.19.0",
@@ -43,8 +52,9 @@ const manifest = {
 };
 writeFileSync(join(directory, "build-manifest.json"), `${canonical(manifest)}\n`);
 
-const files = readdirSync(directory)
-  .filter((name) => name !== "SHA256SUMS")
+const files = readdirSync(directory, { withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name !== "SHA256SUMS")
+  .map((entry) => entry.name)
   .sort();
 writeFileSync(
   join(directory, "SHA256SUMS"),

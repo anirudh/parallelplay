@@ -17,7 +17,12 @@ const files = readdirSync(input).sort();
 const selected =
   mode === "base"
     ? files.filter((name) => !["SHA256SUMS", "build-manifest.json"].includes(name))
-    : files.filter((name) => /^parallelplay-cli-.+\.(?:tar\.gz|spdx\.json)$/.test(name));
+    : files.filter(
+        (name) =>
+          /^parallelplay-cli-.+\.(?:tar\.gz|spdx\.json)$/.test(name) ||
+          /^parallelplay-provider-.+\.(?:oci\.tar|oci\.tar\.spdx\.json)$/.test(name) ||
+          /^provider-images-.+\.json$/.test(name)
+      );
 
 if (selected.length === 0) throw new Error("No release assets selected");
 for (const name of selected) copyFileSync(join(input, name), join(output, basename(name)));

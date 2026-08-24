@@ -24,6 +24,7 @@
     "parallelplay": "node apps/cli/dist/main.js",
     "conformance": "vitest run packages/conformance/src",
     "provider-lock:verify": "node scripts/verify-provider-lock.mjs",
+    "provider-containment:check": "node scripts/provider-containment-check.mjs",
     "public:audit": "node scripts/public-audit.mjs",
     "release:build": "pnpm build && node scripts/release/build-release.mjs",
     "release:inspect": "node scripts/release/inspect-release.mjs",
@@ -31,7 +32,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false",
-    "verify": "pnpm sandbox:check && pnpm provider-lock:verify && pnpm public:audit && pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && node scripts/release/inspect-release.mjs"
+    "verify": "pnpm sandbox:check && pnpm provider-lock:verify && pnpm provider-containment:check && pnpm public:audit && pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && node scripts/release/inspect-release.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

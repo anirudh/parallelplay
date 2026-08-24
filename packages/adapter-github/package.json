@@ -8,6 +8,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./guided-setup": {
+      "types": "./dist/guided-setup.d.ts",
+      "import": "./dist/guided-setup.js"
+    },
+    "./live-pilot": {
+      "types": "./dist/live-pilot.d.ts",
+      "import": "./dist/live-pilot.js"
     }
   },
   "files": [

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -10,11 +11,20 @@ import {
   writeFileSync
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { createTarGz, directoryEntries, memoryEntry } from "./archive.mjs";
 
-const VERSION = "0.1.0";
+const VERSION = process.env.PARALLELPLAY_RELEASE_VERSION ?? "0.1.0";
+const RELEASE_TAG = process.env.PARALLELPLAY_RELEASE_TAG ?? `v${VERSION}`;
+const SUITE_VERSION = "0.1.0";
 const REPOSITORY = "https://github.com/anirudh/parallelplay";
+if (!/^0\.1\.0(?:-rc\.[1-9][0-9]*)?$/.test(VERSION)) {
+  throw new Error("PARALLELPLAY_RELEASE_VERSION must be 0.1.0 or 0.1.0-rc.N");
+}
+if (!/^v0\.1\.0(?:-rc\.[1-9][0-9]*)?$/.test(RELEASE_TAG)) {
+  throw new Error("PARALLELPLAY_RELEASE_TAG must be v0.1.0 or v0.1.0-rc.N");
+}
 const epoch = Number(process.env.SOURCE_DATE_EPOCH ?? "1767225600");
 if (!Number.isSafeInteger(epoch) || epoch <= 0)
   throw new Error("SOURCE_DATE_EPOCH must be a positive integer");
@@ -34,11 +44,14 @@ function canonical(value) {
 
 function releaseUrl(packageName) {
   const shortName = packageName.replace("@parallelplay/", "parallelplay-");
-  return `${REPOSITORY}/releases/download/v${VERSION}/${shortName}-${VERSION}.tgz`;
+  return `${REPOSITORY}/releases/download/${RELEASE_TAG}/${shortName}-${VERSION}.tgz`;
 }
 
 function rewriteManifest(manifest, urls) {
   const rewritten = structuredClone(manifest);
+  if (typeof rewritten.name === "string" && rewritten.name.startsWith("@parallelplay/")) {
+    rewritten.version = VERSION;
+  }
   for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
     if (!rewritten[field]) continue;
     for (const [name, value] of Object.entries(rewritten[field])) {
@@ -84,7 +97,7 @@ function spdxFor(artifact, components) {
     dataLicense: "CC0-1.0",
     SPDXID: "SPDXRef-DOCUMENT",
     name: `${artifact.name} SBOM`,
-    documentNamespace: `${REPOSITORY}/releases/download/v${VERSION}/sbom/${artifact.sha256}`,
+    documentNamespace: `${REPOSITORY}/releases/download/${RELEASE_TAG}/sbom/${artifact.sha256}`,
     creationInfo: {
       created: new Date(epoch * 1000).toISOString(),
       creators: ["Tool: parallelplay-release-builder-0.1.0"]
@@ -94,7 +107,7 @@ function spdxFor(artifact, components) {
         name: artifact.name,
         SPDXID: "SPDXRef-Artifact",
         versionInfo: VERSION,
-        downloadLocation: `${REPOSITORY}/releases/download/v${VERSION}/${artifact.name}`,
+        downloadLocation: `${REPOSITORY}/releases/download/${RELEASE_TAG}/${artifact.name}`,
         filesAnalyzed: false,
         checksums: [{ algorithm: "SHA256", checksumValue: artifact.sha256 }],
         licenseConcluded: "MIT",
@@ -117,6 +130,98 @@ function releasePlatform() {
     throw new Error(`Unsupported release platform: ${value}`);
   }
   return value === "darwin-arm64" ? "macos-arm64" : value;
+}
+
+function nativeNotificationBridgeEntry(cliPrefix, platform) {
+  if (platform.startsWith("linux-")) {
+    return [
+      memoryEntry(
+        `${cliPrefix}/libexec/parallelplay-notification-bridge`,
+        `#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec node "$ROOT/node_modules/@parallelplay/adapter-notifications/dist/linux-bridge-process.js"\n`,
+        0o755
+      )
+    ];
+  }
+  if (platform !== "macos-arm64") return [];
+  const temporary = mkdtempSync(join(tmpdir(), "parallelplay-notification-bridge-"));
+  try {
+    const output = join(temporary, "parallelplay-notification-bridge");
+    execFileSync(process.execPath, ["scripts/notifications/build-macos-bridge.mjs", output], {
+      stdio: "inherit",
+      env: { ...process.env, LANG: "C", LC_ALL: "C" }
+    });
+    return [
+      memoryEntry(
+        `${cliPrefix}/libexec/parallelplay-notification-bridge`,
+        readFileSync(output),
+        0o755
+      )
+    ];
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
+function providerImageBundle(output, cliPrefix, releasePlatformName) {
+  const directory = process.env.PARALLELPLAY_PROVIDER_IMAGES_DIRECTORY;
+  if (!directory) {
+    if (process.env.PARALLELPLAY_REQUIRE_PROVIDER_IMAGES === "1") {
+      throw new Error("Release requires provider OCI layouts but none were supplied");
+    }
+    return { entries: [], artifacts: [], components: new Map() };
+  }
+  const root = resolve(directory);
+  const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
+  const expectedPlatform =
+    releasePlatformName === "macos-arm64" ? "linux-arm64" : releasePlatformName;
+  if (
+    manifest.schemaVersion !== 1 ||
+    manifest.version !== VERSION ||
+    manifest.platform !== expectedPlatform ||
+    !Array.isArray(manifest.images) ||
+    manifest.images.length !== 2
+  ) {
+    throw new Error("Provider OCI manifest does not match the release version and platform");
+  }
+  const entries = [];
+  const artifacts = [];
+  const components = new Map();
+  const publicManifest = { ...manifest, images: [] };
+  for (const image of [...manifest.images].sort((left, right) =>
+    left.name.localeCompare(right.name)
+  )) {
+    if (
+      !["provider-relay", "provider-runner"].includes(image.name) ||
+      !/^sha256:[a-f0-9]{64}$/.test(`sha256:${image.imageDigest}`) ||
+      !/^[a-f0-9]{64}$/.test(image.archiveDigest) ||
+      !/^[A-Za-z0-9._-]+\.oci\.tar$/.test(image.archive)
+    ) {
+      throw new Error("Provider OCI manifest contains an invalid image binding");
+    }
+    const bytes = readFileSync(join(root, image.archive));
+    const archiveDigest = sha256(bytes);
+    if (archiveDigest !== image.archiveDigest) {
+      throw new Error(`${image.name} OCI archive digest does not match its manifest`);
+    }
+    const name = `parallelplay-${image.name}-${VERSION}-${expectedPlatform}.oci.tar`;
+    const path = join(output, name);
+    writeFileSync(path, bytes, { mode: 0o644 });
+    artifacts.push({ name, path, sha256: archiveDigest, size: bytes.length });
+    entries.push(memoryEntry(`${cliPrefix}/oci/${image.name}.oci.tar`, bytes));
+    const source =
+      image.name === "provider-relay"
+        ? resolve("apps/provider-relay")
+        : resolve("apps/provider-runner");
+    components.set(name, packageDependencyInventory(source));
+    publicManifest.images.push({ ...image, releaseAsset: name });
+  }
+  entries.push(memoryEntry(`${cliPrefix}/oci/manifest.json`, `${canonical(publicManifest)}\n`));
+  writeFileSync(
+    join(output, `provider-images-${VERSION}-${expectedPlatform}.json`),
+    `${canonical(publicManifest)}\n`,
+    { mode: 0o644 }
+  );
+  return { entries, artifacts, components };
 }
 
 function sourceEntries() {
@@ -177,7 +282,7 @@ function packageDependencyInventory(sourceDirectory) {
       identity,
       name: manifest.name,
       version: manifest.version,
-      license: typeof manifest.license === "string" ? manifest.license : "UNKNOWN"
+      license: declaredLicense(manifest)
     });
     for (const dependency of Object.keys({
       ...(manifest.dependencies ?? {}),
@@ -217,7 +322,7 @@ function runtimePackageTree(sourceDirectory, archivePrefix) {
       identity,
       name: manifest.name,
       version: manifest.version,
-      license: typeof manifest.license === "string" ? manifest.license : "UNKNOWN"
+      license: declaredLicense(manifest)
     });
     const workspacePackage =
       source.startsWith(`${repositoryRoot}/packages/`) ||
@@ -286,6 +391,26 @@ function runtimePackageTree(sourceDirectory, archivePrefix) {
   };
 }
 
+function declaredLicense(manifest) {
+  if (typeof manifest.license === "string" && manifest.license.trim()) {
+    return manifest.license.trim().replace(/^Apache2$/i, "Apache-2.0");
+  }
+  if (Array.isArray(manifest.license)) {
+    const values = manifest.license
+      .map((entry) =>
+        typeof entry === "string"
+          ? entry
+          : entry && typeof entry === "object" && typeof entry.type === "string"
+            ? entry.type
+            : null
+      )
+      .filter(Boolean)
+      .map((entry) => entry.replace(/^Apache2$/i, "Apache-2.0"));
+    if (values.length > 0) return values.join(" OR ");
+  }
+  return "UNKNOWN";
+}
+
 export function buildRelease(outputDirectory) {
   const output = resolve(outputDirectory);
   if (
@@ -347,6 +472,11 @@ export function buildRelease(outputDirectory) {
 
     const platform = releasePlatform();
     const cliPrefix = `parallelplay-${VERSION}`;
+    const providerImages = providerImageBundle(output, cliPrefix, platform);
+    for (const artifact of providerImages.artifacts) {
+      primaryArtifacts.push(artifact);
+      componentInventory.set(artifact.name, providerImages.components.get(artifact.name) ?? []);
+    }
     const runtimeTree = runtimePackageTree(resolve("apps/cli"), cliPrefix);
     const cliEntries = [
       memoryEntry(`${cliPrefix}/LICENSE`, readFileSync(resolve("LICENSE"))),
@@ -356,6 +486,42 @@ export function buildRelease(outputDirectory) {
         '#!/bin/sh\nset -eu\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec node "$DIR/dist/main.js" "$@"\n',
         0o755
       ),
+      memoryEntry(
+        `${cliPrefix}/bin/parallelplay-keyless-pilot`,
+        '#!/bin/sh\nset -eu\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec node "$DIR/libexec/keyless-release.mjs" --cli "$DIR/bin/parallelplay" "$@"\n',
+        0o755
+      ),
+      memoryEntry(
+        `${cliPrefix}/libexec/keyless-release.mjs`,
+        readFileSync(resolve("scripts/pilot/keyless-release.mjs")),
+        0o755
+      ),
+      memoryEntry(
+        `${cliPrefix}/bin/parallelplay-provider-trial`,
+        '#!/bin/sh\nset -eu\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec node "$DIR/libexec/provider-trial.mjs" --cli-root "$DIR" --runtime "$DIR/node_modules/@parallelplay/runtime/dist/index.js" "$@"\n',
+        0o755
+      ),
+      memoryEntry(
+        `${cliPrefix}/libexec/provider-trial.mjs`,
+        readFileSync(resolve("scripts/pilot/provider-trial.mjs")),
+        0o755
+      ),
+      memoryEntry(
+        `${cliPrefix}/bin/parallelplay-notification-trial`,
+        '#!/bin/sh\nset -eu\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec node "$DIR/libexec/notification-trial.mjs" --kernel "$DIR/node_modules/@parallelplay/kernel/dist/index.js" --adapters "$DIR/node_modules/@parallelplay/adapter-notifications/dist/index.js" --receiver "$DIR/node_modules/@parallelplay/adapter-notifications/dist/loopback-receiver.js" --bridge "$DIR/libexec/parallelplay-notification-bridge" "$@"\n',
+        0o755
+      ),
+      memoryEntry(
+        `${cliPrefix}/libexec/notification-trial.mjs`,
+        readFileSync(resolve("scripts/pilot/notification-trial.mjs")),
+        0o755
+      ),
+      memoryEntry(
+        `${cliPrefix}/fixture/manifest.json`,
+        readFileSync(resolve("fixtures/parallelplay-fixture-manifest.json"))
+      ),
+      ...nativeNotificationBridgeEntry(cliPrefix, platform),
+      ...providerImages.entries,
       ...runtimeTree.entries
     ];
     const cliArtifact = writeArchive(
@@ -389,7 +555,7 @@ export function buildRelease(outputDirectory) {
 
     const suiteManifest = {
       schemaVersion: 1,
-      suiteVersion: VERSION,
+      suiteVersion: SUITE_VERSION,
       contracts: [
         "agent-driver-v1",
         "workflow-extension-v1",
@@ -419,12 +585,15 @@ export function buildRelease(outputDirectory) {
         [...componentInventory.values()].flat().map((entry) => [entry.identity, entry])
       ).values()
     ].sort((left, right) => left.identity.localeCompare(right.identity));
-    if (
-      licenses.some(
-        (entry) => entry.license === "UNKNOWN" || /UNLICENSED|PROPRIETARY/i.test(entry.license)
-      )
-    ) {
-      throw new Error("Release dependency has an unknown or unexpected license");
+    const unexpectedLicenses = licenses.filter(
+      (entry) => entry.license === "UNKNOWN" || /UNLICENSED|PROPRIETARY/i.test(entry.license)
+    );
+    if (unexpectedLicenses.length > 0) {
+      throw new Error(
+        `Release dependency has an unknown or unexpected license: ${unexpectedLicenses
+          .map((entry) => entry.identity)
+          .join(", ")}`
+      );
     }
     writeFileSync(
       join(output, "license-inventory.json"),
@@ -433,6 +602,7 @@ export function buildRelease(outputDirectory) {
     const buildManifest = {
       schemaVersion: 1,
       version: VERSION,
+      releaseTag: RELEASE_TAG,
       sourceDateEpoch: epoch,
       node: "22.17.1+",
       pnpm: "11.19.0",

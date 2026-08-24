@@ -1,24 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import {
-  DriverEventBatchV1Schema,
-  DriverReceiptV1Schema,
-  DriverSessionV1Schema,
-  EvaluatorExtensionResultV1Schema,
-  ExtensionManifestV1Schema,
-  OutboundEffectReceiptV1Schema,
-  OutboundReconciliationV1Schema,
-  PolicyExtensionResultV1Schema,
-  WorkflowExtensionResultV1Schema,
-  isAutomaticActionAllowed,
-  type AgentDriverV1,
-  type AutomaticActionKind,
-  type EvaluatorExtensionV1,
-  type OutboundAdapterV1,
-  type PolicyExtensionV1,
-  type WorkflowExtensionV1
-} from "@parallelplay/contracts";
+import { ExtensionManifestV1Schema, type ExtensionManifestV1 } from "@parallelplay/contracts";
 import { z } from "zod";
 
 export const ConformanceCheckV1Schema = z.strictObject({
@@ -38,6 +21,7 @@ export const ConformanceReportV1Schema = z.strictObject({
   ]),
   extensionId: z.string().min(1).max(100),
   extensionVersion: z.string().min(1).max(100),
+  sourceCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
   artifactDigest: z.string().regex(/^[a-f0-9]{64}$/),
   platform: z.strictObject({
     os: z.string().min(1),
@@ -200,19 +184,6 @@ export function writeConformanceOutputs(
 class ReportBuilder {
   readonly #checks: z.infer<typeof ConformanceCheckV1Schema>[] = [];
 
-  check(id: string, operation: () => void): void {
-    try {
-      operation();
-      this.#checks.push({ id, status: "passed", detail: "Passed" });
-    } catch (error) {
-      this.#checks.push({
-        id,
-        status: "failed",
-        detail: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-
   async checkAsync(id: string, operation: () => Promise<void>): Promise<void> {
     try {
       await operation();
@@ -228,7 +199,8 @@ class ReportBuilder {
 
   finish(
     contract: ConformanceReportV1["contract"],
-    manifest: z.infer<typeof ExtensionManifestV1Schema>
+    manifest: z.infer<typeof ExtensionManifestV1Schema>,
+    sourceCommit: string
   ): ConformanceReportV1 {
     const unsigned = {
       schemaVersion: 1 as const,
@@ -236,6 +208,7 @@ class ReportBuilder {
       contract,
       extensionId: manifest.id,
       extensionVersion: manifest.extensionVersion,
+      sourceCommit,
       artifactDigest: manifest.artifact.sha256,
       platform: { os: process.platform, arch: process.arch, node: process.version },
       checks: this.#checks,
@@ -248,148 +221,69 @@ class ReportBuilder {
   }
 }
 
-export async function runDriverConformance(
-  driver: AgentDriverV1,
-  request: Parameters<AgentDriverV1["start"]>[0]
+export type ConformanceContractV1 = keyof typeof CONFORMANCE_REQUIREMENTS_V1;
+export interface ConformanceSubjectV1 {
+  readonly manifest: ExtensionManifestV1;
+  close?(): Promise<void>;
+}
+export interface ConformanceCaseV1 {
+  id: string;
+  run(extension: ConformanceSubjectV1): Promise<void>;
+}
+
+export interface ConformanceHarnessV1 {
+  contract: ConformanceContractV1;
+  manifest: ExtensionManifestV1;
+  sourceCommit: string;
+  createExtension(requirementId: string): Promise<ConformanceSubjectV1> | ConformanceSubjectV1;
+  cases: readonly ConformanceCaseV1[];
+}
+
+export async function runConformanceHarness(
+  rawHarness: ConformanceHarnessV1
 ): Promise<ConformanceReportV1> {
+  const manifest = ExtensionManifestV1Schema.parse(rawHarness.manifest);
+  const sourceCommit = z
+    .string()
+    .regex(/^[a-f0-9]{40,64}$/)
+    .parse(rawHarness.sourceCommit);
+  if (manifest.contract.name !== rawHarness.contract) {
+    throw new Error("Conformance harness contract does not match the extension manifest");
+  }
+  const requirements = CONFORMANCE_REQUIREMENTS_V1[rawHarness.contract] as readonly string[];
+  const allowed = new Set(requirements);
+  const cases = new Map<string, ConformanceCaseV1>();
+  for (const testCase of rawHarness.cases) {
+    if (!allowed.has(testCase.id)) {
+      throw new Error(`Unknown ${rawHarness.contract} conformance case: ${testCase.id}`);
+    }
+    if (cases.has(testCase.id)) {
+      throw new Error(`Duplicate ${rawHarness.contract} conformance case: ${testCase.id}`);
+    }
+    cases.set(testCase.id, testCase);
+  }
+
   const builder = new ReportBuilder();
-  const manifest = ExtensionManifestV1Schema.parse(driver.manifest);
-  builder.check("manifest", () => {
-    if (manifest.kind !== "driver" || manifest.contract.name !== "agent-driver-v1") {
-      throw new Error("Manifest does not declare agent-driver-v1");
-    }
-  });
-  let session: Awaited<ReturnType<AgentDriverV1["start"]>> | undefined;
-  await builder.checkAsync("start", async () => {
-    session = DriverSessionV1Schema.parse(await driver.start(request));
-  });
-  if (session) {
-    const startedSession = session;
-    await builder.checkAsync("inspect-structured-events", async () => {
-      DriverEventBatchV1Schema.parse(
-        await driver.inspect({
-          schemaVersion: 1,
-          sessionId: startedSession.sessionId,
-          afterSequence: 0
-        })
-      );
-    });
-    await builder.checkAsync("receipt", async () => {
-      DriverReceiptV1Schema.parse(await driver.collectReceipt(startedSession.sessionId));
-    });
-    const checkpointDigest = startedSession.checkpointDigest;
-    if (checkpointDigest) {
-      await builder.checkAsync("resume", async () => {
-        DriverSessionV1Schema.parse(
-          await driver.resume({
-            schemaVersion: 1,
-            effectKey: `${request.effectKey}:resume`,
-            sessionId: startedSession.sessionId,
-            checkpointDigest,
-            contextDigest: request.contextDigest,
-            executionContractDigest: request.executionContractDigest,
-            capabilityManifestDigest: request.capabilityManifestDigest
-          })
-        );
-      });
-    }
-    await builder.checkAsync("cancel-idempotent", async () => {
-      await driver.cancel({
-        schemaVersion: 1,
-        effectKey: `${request.effectKey}:cancel`,
-        sessionId: startedSession.sessionId,
-        reason: "operator_cancelled"
-      });
+  for (const requirement of requirements) {
+    const testCase = cases.get(requirement);
+    await builder.checkAsync(requirement, async () => {
+      if (!testCase) throw new Error(`Missing required conformance case: ${requirement}`);
+      const extension = await rawHarness.createExtension(requirement);
+      const extensionManifest = ExtensionManifestV1Schema.parse(extension.manifest);
+      if (
+        extensionManifest.id !== manifest.id ||
+        extensionManifest.extensionVersion !== manifest.extensionVersion ||
+        extensionManifest.artifact.sha256 !== manifest.artifact.sha256 ||
+        extensionManifest.contract.name !== rawHarness.contract
+      ) {
+        throw new Error("Conformance case received an extension with a mismatched identity");
+      }
+      try {
+        await testCase.run(extension);
+      } finally {
+        await extension.close?.();
+      }
     });
   }
-  await builder.checkAsync("close", async () => driver.close());
-  return builder.finish("agent-driver-v1", manifest);
-}
-
-export async function runWorkflowConformance(
-  extension: WorkflowExtensionV1,
-  request: Parameters<WorkflowExtensionV1["compile"]>[0]
-): Promise<ConformanceReportV1> {
-  const builder = new ReportBuilder();
-  const manifest = ExtensionManifestV1Schema.parse(extension.manifest);
-  await builder.checkAsync("deterministic-compile", async () => {
-    const first = WorkflowExtensionResultV1Schema.parse(await extension.compile(request));
-    const second = WorkflowExtensionResultV1Schema.parse(await extension.compile(request));
-    if (conformanceDigest(first) !== conformanceDigest(second)) {
-      throw new Error("Workflow compilation is not deterministic");
-    }
-  });
-  return builder.finish("workflow-extension-v1", manifest);
-}
-
-export async function runEvaluatorConformance(
-  extension: EvaluatorExtensionV1,
-  request: Parameters<EvaluatorExtensionV1["evaluate"]>[0]
-): Promise<ConformanceReportV1> {
-  const builder = new ReportBuilder();
-  const manifest = ExtensionManifestV1Schema.parse(extension.manifest);
-  await builder.checkAsync("deterministic-evaluation", async () => {
-    const first = EvaluatorExtensionResultV1Schema.parse(await extension.evaluate(request));
-    const second = EvaluatorExtensionResultV1Schema.parse(await extension.evaluate(request));
-    if (first.evidenceDigest !== request.evidenceDigest) throw new Error("Evidence digest changed");
-    if (conformanceDigest(first) !== conformanceDigest(second)) {
-      throw new Error("Evaluator output is not deterministic");
-    }
-  });
-  return builder.finish("evaluator-extension-v1", manifest);
-}
-
-export async function runPolicyConformance(
-  extension: PolicyExtensionV1,
-  baseRequest: Parameters<PolicyExtensionV1["decide"]>[0]
-): Promise<ConformanceReportV1> {
-  const builder = new ReportBuilder();
-  const manifest = ExtensionManifestV1Schema.parse(extension.manifest);
-  const forbidden: AutomaticActionKind[] = [
-    "merge",
-    "ready-for-review",
-    "release",
-    "deploy",
-    "scope.accept",
-    "graph.accept",
-    "outcome.accept",
-    "policy.promote",
-    "permission.change",
-    "secret.change",
-    "capability.expand"
-  ];
-  await builder.checkAsync("global-authority-ceiling", async () => {
-    for (const action of forbidden) {
-      if (isAutomaticActionAllowed(action))
-        throw new Error(`${action} entered the global allowlist`);
-      const result = PolicyExtensionResultV1Schema.parse(
-        await extension.decide({ ...baseRequest, proposedAction: action })
-      );
-      if (result.decision === "allow_within_global_ceiling") {
-        throw new Error(`Policy attempted to authorize forbidden action ${action}`);
-      }
-    }
-  });
-  return builder.finish("policy-extension-v1", manifest);
-}
-
-export async function runAdapterConformance(
-  adapter: OutboundAdapterV1,
-  request: Parameters<OutboundAdapterV1["deliver"]>[0]
-): Promise<ConformanceReportV1> {
-  const builder = new ReportBuilder();
-  const manifest = ExtensionManifestV1Schema.parse(adapter.manifest);
-  await builder.checkAsync("exact-idempotent-effect", async () => {
-    const first = OutboundEffectReceiptV1Schema.parse(await adapter.deliver(request));
-    const second = OutboundEffectReceiptV1Schema.parse(await adapter.deliver(request));
-    if (first.receiptDigest !== second.receiptDigest || first.externalId !== second.externalId) {
-      throw new Error("Duplicate delivery did not converge");
-    }
-  });
-  await builder.checkAsync("live-reconciliation", async () => {
-    const result = OutboundReconciliationV1Schema.parse(await adapter.reconcile(request.effectKey));
-    if (result.status !== "observed_exact") throw new Error("Exact effect was not observed");
-  });
-  await builder.checkAsync("close", async () => adapter.close());
-  return builder.finish("outbound-adapter-v1", manifest);
+  return builder.finish(rawHarness.contract, manifest, sourceCommit);
 }

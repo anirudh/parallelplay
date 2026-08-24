@@ -7,6 +7,7 @@ import type {
 } from "@parallelplay/kernel";
 
 const client = new AttentionClient();
+let activeGitHubPromotionDigest: string | null = null;
 
 function element<K extends keyof HTMLElementTagNameMap>(
   name: K,
@@ -220,7 +221,10 @@ async function refresh(): Promise<void> {
       ? document.activeElement.dataset["focusKey"]
       : undefined;
   try {
-    const combined = await client.snapshotV2();
+    const [combined, outbound] = await Promise.all([
+      client.snapshotV2(),
+      client.outboundSnapshot()
+    ]);
     const snapshot = combined.attention;
     const advisorSnapshot = combined.advisor;
     await Promise.all([
@@ -228,6 +232,19 @@ async function refresh(): Promise<void> {
       renderList(queue, snapshot.queue, snapshot)
     ]);
     renderAdvisor(advisor, advisorSnapshot);
+    const activePolicy = outbound.policies.find(
+      (entry) =>
+        entry.status === "active" &&
+        entry.policy.name === "Fixture-only GitHub pilot" &&
+        entry.policy.expiresAt > new Date().toISOString()
+    );
+    activeGitHubPromotionDigest = activePolicy?.promotionDigest ?? null;
+    const policyStatus = document.querySelector<HTMLElement>("#github-policy-status");
+    if (policyStatus) {
+      policyStatus.textContent = activePolicy
+        ? `Active until ${activePolicy.policy.expiresAt}; ${String(outbound.effects.length)} recorded effects.`
+        : "No active fixture policy.";
+    }
     status.textContent = `Authoritative through event position ${String(snapshot.throughPosition)}.`;
     if (focusKey) {
       const restored = [...document.querySelectorAll<HTMLElement>("[data-focus-key]")].find(
@@ -259,6 +276,72 @@ async function initialize(): Promise<void> {
   if (token) history.replaceState(null, "", `${location.pathname}${location.search}`);
   const identity = document.querySelector<HTMLElement>("#identity");
   if (identity) identity.textContent = `Actions are bound to operator ${session.operatorId}.`;
+  const setupButton = document.querySelector<HTMLButtonElement>("#github-setup-start");
+  setupButton?.addEventListener("click", () => {
+    setupButton.disabled = true;
+    void client
+      .startGitHubSetup()
+      .then(({ launchPath }) => window.open(launchPath, "_blank", "noopener,noreferrer"))
+      .catch(showError)
+      .finally(() => {
+        setupButton.disabled = false;
+      });
+  });
+  const installationButton = document.querySelector<HTMLButtonElement>(
+    "#github-installation-verify"
+  );
+  const installationInput = document.querySelector<HTMLInputElement>("#github-installation-id");
+  installationButton?.addEventListener("click", () => {
+    const installationId = installationInput?.value.trim() ?? "";
+    installationButton.disabled = true;
+    void client
+      .verifyGitHubInstallation(installationId)
+      .then(({ repository }) => {
+        const root = document.querySelector<HTMLElement>("#github-setup .muted");
+        if (root) root.textContent = `Verified fixture-only access to ${repository}.`;
+      })
+      .catch(showError)
+      .finally(() => {
+        installationButton.disabled = false;
+      });
+  });
+  const promoteButton = document.querySelector<HTMLButtonElement>("#github-policy-promote");
+  promoteButton?.addEventListener("click", () => {
+    promoteButton.disabled = true;
+    void client
+      .promoteFixtureGitHubPolicy()
+      .then(() => refresh())
+      .catch(showError)
+      .finally(() => {
+        promoteButton.disabled = false;
+      });
+  });
+  const suspendButton = document.querySelector<HTMLButtonElement>("#github-policy-suspend");
+  const pilotButton = document.querySelector<HTMLButtonElement>("#github-pilot-run");
+  pilotButton?.addEventListener("click", () => {
+    const promotionDigest = activeGitHubPromotionDigest;
+    if (!promotionDigest) return;
+    pilotButton.disabled = true;
+    void client
+      .runFixtureGitHubPilot(promotionDigest)
+      .then(() => refresh())
+      .catch(showError)
+      .finally(() => {
+        pilotButton.disabled = false;
+      });
+  });
+  suspendButton?.addEventListener("click", () => {
+    const promotionDigest = activeGitHubPromotionDigest;
+    if (!promotionDigest) return;
+    suspendButton.disabled = true;
+    void client
+      .suspendFixtureGitHubPolicy(promotionDigest)
+      .then(() => refresh())
+      .catch(showError)
+      .finally(() => {
+        suspendButton.disabled = false;
+      });
+  });
   await refresh();
 }
 

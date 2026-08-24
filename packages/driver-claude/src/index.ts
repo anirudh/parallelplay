@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import {
   DriverCancelV1Schema,
@@ -10,6 +10,7 @@ import {
   DriverReceiptV1Schema,
   DriverResumeV1Schema,
   DriverSessionV1Schema,
+  ExtensionManifestV1Schema,
   type AgentDriverV1,
   type DriverCancelV1,
   type DriverEventBatchV1,
@@ -23,12 +24,74 @@ import {
 import { z } from "zod";
 
 const SDK_VERSION = "0.3.241";
-const RawMessageSchema = z.looseObject({ type: z.string().min(1) });
+const MAX_PROVIDER_EVENT_BYTES = 2 * 1024 * 1024;
+const ClaudeSystemSubtypeSchema = z.enum([
+  "api_retry",
+  "background_tasks_changed",
+  "commands_changed",
+  "compact_boundary",
+  "control_request_progress",
+  "elicitation_complete",
+  "files_persisted",
+  "hook_progress",
+  "hook_response",
+  "hook_started",
+  "informational",
+  "init",
+  "local_command_output",
+  "memory_recall",
+  "mirror_error",
+  "model_refusal_fallback",
+  "model_refusal_no_fallback",
+  "notification",
+  "permission_denied",
+  "plugin_install",
+  "session_state_changed",
+  "status",
+  "task_notification",
+  "task_progress",
+  "task_started",
+  "task_updated",
+  "thinking_tokens",
+  "worker_shutting_down"
+]);
+const ClaudeNonterminalMessageSchema = z.union([
+  z.looseObject({
+    type: z.literal("system"),
+    subtype: ClaudeSystemSubtypeSchema,
+    uuid: z.string().min(1),
+    session_id: z.string().min(1)
+  }),
+  z.looseObject({
+    type: z.enum([
+      "active_goal",
+      "assistant",
+      "auth_status",
+      "conversation_reset",
+      "prompt_suggestion",
+      "rate_limit_event",
+      "stream_event",
+      "tool_progress",
+      "tool_use_summary"
+    ]),
+    uuid: z.string().min(1),
+    session_id: z.string().min(1)
+  }),
+  z.looseObject({
+    type: z.literal("user"),
+    message: z.unknown(),
+    parent_tool_use_id: z.string().nullable(),
+    uuid: z.string().min(1).optional(),
+    session_id: z.string().min(1).optional()
+  })
+]);
 const SystemInitSchema = z.looseObject({
   type: z.literal("system"),
   subtype: z.literal("init"),
   session_id: z.string().min(1),
-  model: z.string().min(1)
+  uuid: z.string().min(1),
+  model: z.string().min(1),
+  permissionMode: z.enum(["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"])
 });
 const ModelUsageSchema = z.looseObject({
   inputTokens: z.number().int().nonnegative(),
@@ -39,16 +102,28 @@ const ModelUsageSchema = z.looseObject({
 });
 const ResultSchema = z.looseObject({
   type: z.literal("result"),
-  subtype: z.string().min(1),
+  subtype: z.enum([
+    "success",
+    "error_during_execution",
+    "error_max_turns",
+    "error_max_budget_usd",
+    "error_max_structured_output_retries"
+  ]),
   is_error: z.boolean(),
   total_cost_usd: z.number().nonnegative(),
   modelUsage: z.record(z.string(), ModelUsageSchema),
   permission_denials: z.array(z.unknown()),
   session_id: z.string().min(1),
+  uuid: z.string().min(1),
   errors: z.array(z.string()).optional()
 });
+const ClaudeMessageSchema = z.union([
+  SystemInitSchema,
+  ResultSchema,
+  ClaudeNonterminalMessageSchema
+]);
 
-function sha256(value: string): string {
+function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
@@ -59,6 +134,14 @@ function canonical(value: unknown): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
     .join(",")}}`;
+}
+
+function parseProviderMessage(raw: unknown): z.infer<typeof ClaudeMessageSchema> {
+  const encoded = canonical(raw);
+  if (Buffer.byteLength(encoded, "utf8") > MAX_PROVIDER_EVENT_BYTES) {
+    throw new Error("Claude provider event exceeded the validated size limit");
+  }
+  return ClaudeMessageSchema.parse(raw);
 }
 
 interface ClaudeQueryLike extends AsyncIterable<unknown> {
@@ -86,7 +169,7 @@ interface ClaudeQueryRequest {
 }
 
 export interface ClaudeSdkDriverOptions {
-  image: string;
+  manifest: ExtensionManifestV1;
   brokerBaseUrl: string;
   brokerToken: string;
   workspace?: string;
@@ -108,6 +191,8 @@ interface StoredSession {
   events: DriverProtocolEventV1[];
   rawStreamDigest: string;
   rawEventCount: number;
+  seenRawEventDigests: string[];
+  baselineFiles: Record<string, string>;
   status: DriverEventBatchV1["status"];
   terminalReason: string | null;
   completedAt: string | null;
@@ -115,6 +200,8 @@ interface StoredSession {
 
 interface LiveSession extends StoredSession {
   activeQuery: ClaudeQueryLike | null;
+  timeout: NodeJS.Timeout | null;
+  persistChain: Promise<void>;
 }
 
 type PendingDriverEvent = DriverProtocolEventV1 extends infer Event
@@ -122,40 +209,6 @@ type PendingDriverEvent = DriverProtocolEventV1 extends infer Event
     ? Omit<Event, "schemaVersion" | "sequence" | "occurredAt">
     : never
   : never;
-
-function manifest(image: string): ExtensionManifestV1 {
-  if (!/^[^\s@]+@sha256:[a-f0-9]{64}$/.test(image))
-    throw new Error("Claude driver image must be digest pinned");
-  return {
-    schemaVersion: 1,
-    id: "claude-agent-sdk",
-    displayName: "Claude Agent SDK",
-    extensionVersion: "0.1.0",
-    kind: "driver",
-    contract: { name: "agent-driver-v1", version: 1 },
-    artifact: {
-      mediaType: "application/vnd.oci.image.manifest.v1+json",
-      reference: image,
-      sha256: image.slice(image.indexOf("sha256:") + 7)
-    },
-    configurationSchemaDigest: sha256("claude-agent-sdk-driver-config-v1"),
-    capabilities: [
-      { name: "provider-api", required: true, detail: "Run-bound Anthropic broker grant" },
-      { name: "workspace", required: true, detail: "Contained writable workspace" }
-    ],
-    provenance: {
-      sourceRepository: "https://github.com/anirudh/parallelplay",
-      sourceRevision: sha256("parallelplay-v0.1.0"),
-      sbomDigest: sha256("claude-agent-sdk-driver-sbom-v1"),
-      attestationDigest: sha256("claude-agent-sdk-driver-attestation-v1")
-    },
-    conformance: {
-      suiteVersion: "0.1.0",
-      reportDigest: sha256("claude-agent-sdk-driver-conformance-pending"),
-      approvedRegistryDigest: null
-    }
-  };
-}
 
 export class ClaudeSdkDriver implements AgentDriverV1 {
   readonly manifest: ExtensionManifestV1;
@@ -176,7 +229,17 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
         "Claude Agent SDK driver refuses to run outside the ParallelPlay OCI boundary"
       );
     }
-    this.manifest = manifest(options.image);
+    const manifest = ExtensionManifestV1Schema.parse(options.manifest);
+    if (
+      manifest.id !== "claude-agent-sdk" ||
+      manifest.kind !== "driver" ||
+      manifest.contract.name !== "agent-driver-v1" ||
+      manifest.artifact.mediaType !== "application/vnd.oci.image.manifest.v1+json" ||
+      !manifest.artifact.reference.endsWith(`@sha256:${manifest.artifact.sha256}`)
+    ) {
+      throw new Error("Claude Agent SDK driver requires a digest-pinned claude-agent-sdk manifest");
+    }
+    this.manifest = manifest;
     this.#workspace = options.workspace ?? "/workspace";
     this.#sessionDirectory = options.sessionDirectory ?? "/session/claude";
     this.#clock = options.clock ?? { now: () => new Date() };
@@ -189,6 +252,7 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
 
   async start(rawRequest: DriverLaunchV1): Promise<DriverSessionV1> {
     const request = DriverLaunchV1Schema.parse(rawRequest);
+    const baselineFiles = await this.#workspaceFiles();
     const sessionId = randomUUID();
     const now = this.#clock.now().toISOString();
     const session = DriverSessionV1Schema.parse({
@@ -210,13 +274,18 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
       events: [{ schemaVersion: 1, sequence: 1, occurredAt: now, type: "started" }],
       rawStreamDigest: sha256(""),
       rawEventCount: 0,
+      seenRawEventDigests: [],
+      baselineFiles,
       status: "running",
       terminalReason: null,
       completedAt: null,
-      activeQuery: null
+      activeQuery: null,
+      timeout: null,
+      persistChain: Promise.resolve()
     };
     this.#sessions.set(sessionId, state);
     await this.#persist(state);
+    this.#armTimeout(state);
     void this.#consume(state, request.prompt);
     return session;
   }
@@ -227,16 +296,24 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
     if (state.status !== "running" || state.terminalReason !== null) {
       throw new Error("Claude session is terminal and cannot be resumed");
     }
-    if (
-      state.launch.contextDigest !== request.contextDigest ||
-      state.launch.executionContractDigest !== request.executionContractDigest ||
-      state.launch.capabilityManifestDigest !== request.capabilityManifestDigest ||
-      state.session.checkpointDigest !== request.checkpointDigest
-    ) {
-      throw new Error("Claude resume binding does not match the stored session");
+    const bindingMismatches = [
+      state.launch.contextDigest !== request.contextDigest ? "context" : null,
+      state.launch.executionContractDigest !== request.executionContractDigest
+        ? "execution-contract"
+        : null,
+      state.launch.capabilityManifestDigest !== request.capabilityManifestDigest
+        ? "capability"
+        : null,
+      state.session.checkpointDigest !== request.checkpointDigest ? "checkpoint" : null
+    ].filter(Boolean);
+    if (bindingMismatches.length > 0) {
+      throw new Error(
+        `Claude resume binding does not match the stored session: ${bindingMismatches.join(",")}`
+      );
     }
     if (!state.providerSessionId)
       throw new Error("Claude provider session has not emitted its resume identity");
+    this.#armTimeout(state);
     void this.#consume(
       state,
       `Continue the interrupted task using the unchanged execution and capability contract.\n\n${state.prompt}`,
@@ -248,6 +325,7 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
   async inspect(rawRequest: Parameters<AgentDriverV1["inspect"]>[0]): Promise<DriverEventBatchV1> {
     const request = DriverInspectV1Schema.parse(rawRequest);
     const state = await this.#get(request.sessionId);
+    await this.#awaitPersistence(state);
     return DriverEventBatchV1Schema.parse({
       schemaVersion: 1,
       afterSequence: request.afterSequence,
@@ -262,6 +340,7 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
     const request = DriverCancelV1Schema.parse(rawRequest);
     const state = await this.#get(request.sessionId);
     if (state.status === "running") {
+      if (state.timeout) clearTimeout(state.timeout);
       await state.activeQuery?.interrupt();
       this.#terminal(state, request.reason, request.reason.replaceAll("_", " "));
       await this.#persist(state);
@@ -271,6 +350,7 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
 
   async collectReceipt(sessionId: string): Promise<DriverReceiptV1> {
     const state = await this.#get(sessionId);
+    await this.#awaitPersistence(state);
     if (state.status === "running" || !state.completedAt || !state.terminalReason) {
       throw new Error("Claude receipt is unavailable before a terminal event");
     }
@@ -341,10 +421,16 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
       });
       state.activeQuery = activeQuery;
       for await (const raw of activeQuery) {
-        const message = RawMessageSchema.parse(raw);
+        const message = parseProviderMessage(raw);
         state.rawStreamDigest = sha256(`${state.rawStreamDigest}:${canonical(message)}`);
         state.rawEventCount += 1;
-        if (message.type === "system") {
+        const rawEventDigest = sha256(canonical(message));
+        if (state.seenRawEventDigests.includes(rawEventDigest)) {
+          await this.#persist(state);
+          continue;
+        }
+        state.seenRawEventDigests.push(rawEventDigest);
+        if (message.type === "system" && message.subtype === "init") {
           const init = SystemInitSchema.parse(message);
           state.providerSessionId = init.session_id;
           if (!state.observedModels.includes(init.model)) state.observedModels.push(init.model);
@@ -389,6 +475,7 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
               pricingSource: `Claude Agent SDK ${SDK_VERSION} estimated total`
             }
           });
+          await this.#appendArtifacts(state);
           if (result.permission_denials.length > 0) {
             this.#append(state, {
               type: "approval.requested",
@@ -404,12 +491,7 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
           } else if (result.subtype === "success" && !result.is_error) {
             this.#terminal(state, "succeeded", "Claude turn completed");
           } else {
-            const errors = result.errors?.join("; ");
-            this.#terminal(
-              state,
-              "failed",
-              errors && errors.length > 0 ? errors : `Claude terminated with ${result.subtype}`
-            );
+            this.#terminal(state, "failed", `claude_${result.subtype}`);
           }
         }
         await this.#persist(state);
@@ -418,9 +500,18 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
         this.#terminal(state, "protocol_invalid", "Claude stream ended without terminal result");
     } catch (error) {
       if (state.status === "running") {
-        this.#terminal(state, "failed", error instanceof Error ? error.message : String(error));
+        const protocolInvalid =
+          error instanceof z.ZodError ||
+          (error instanceof Error && error.message.includes("validated size limit"));
+        this.#terminal(
+          state,
+          protocolInvalid ? "protocol_invalid" : "failed",
+          protocolInvalid ? "provider_event_protocol_invalid" : "provider_execution_failed"
+        );
       }
     } finally {
+      if (state.timeout) clearTimeout(state.timeout);
+      state.timeout = null;
       state.activeQuery = null;
       await this.#persist(state);
     }
@@ -441,6 +532,8 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
     state.status = terminalOutcome;
     state.terminalReason = reason.slice(0, 1000) || "No terminal reason supplied";
     state.completedAt = this.#clock.now().toISOString();
+    if (state.timeout) clearTimeout(state.timeout);
+    state.timeout = null;
     this.#append(state, {
       type: "terminal",
       outcome: terminalOutcome,
@@ -449,28 +542,31 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
   }
 
   async #persist(state: LiveSession): Promise<void> {
-    await mkdir(this.#sessionDirectory, { recursive: true, mode: 0o700 });
-    const stored: StoredSession = {
-      schemaVersion: state.schemaVersion,
-      session: state.session,
-      providerSessionId: state.providerSessionId,
-      observedModels: state.observedModels,
-      prompt: state.prompt,
-      launch: state.launch,
-      events: state.events,
-      rawStreamDigest: state.rawStreamDigest,
-      rawEventCount: state.rawEventCount,
-      status: state.status,
-      terminalReason: state.terminalReason,
-      completedAt: state.completedAt
-    };
-    await writeFile(
-      join(this.#sessionDirectory, `${state.session.sessionId}.json`),
-      canonical(stored),
-      {
-        mode: 0o600
-      }
-    );
+    const operation = state.persistChain.then(async () => {
+      await mkdir(this.#sessionDirectory, { recursive: true, mode: 0o700 });
+      const stored: StoredSession = {
+        schemaVersion: state.schemaVersion,
+        session: state.session,
+        providerSessionId: state.providerSessionId,
+        observedModels: state.observedModels,
+        prompt: state.prompt,
+        launch: state.launch,
+        events: state.events,
+        rawStreamDigest: state.rawStreamDigest,
+        rawEventCount: state.rawEventCount,
+        seenRawEventDigests: state.seenRawEventDigests,
+        baselineFiles: state.baselineFiles,
+        status: state.status,
+        terminalReason: state.terminalReason,
+        completedAt: state.completedAt
+      };
+      const path = join(this.#sessionDirectory, `${state.session.sessionId}.json`);
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      await writeFile(temporary, canonical(stored), { mode: 0o600 });
+      await rename(temporary, path);
+    });
+    state.persistChain = operation;
+    await operation;
   }
 
   async #get(sessionId: string): Promise<LiveSession> {
@@ -479,8 +575,95 @@ export class ClaudeSdkDriver implements AgentDriverV1 {
     const stored = JSON.parse(
       await readFile(join(this.#sessionDirectory, `${sessionId}.json`), "utf8")
     ) as StoredSession;
-    const state: LiveSession = { ...stored, activeQuery: null };
+    const state: LiveSession = {
+      ...stored,
+      seenRawEventDigests: stored.seenRawEventDigests,
+      baselineFiles: stored.baselineFiles,
+      activeQuery: null,
+      timeout: null,
+      persistChain: Promise.resolve()
+    };
     this.#sessions.set(sessionId, state);
     return state;
+  }
+
+  async #awaitPersistence(state: LiveSession): Promise<void> {
+    for (;;) {
+      const pending = state.persistChain;
+      await pending;
+      if (pending === state.persistChain) return;
+    }
+  }
+
+  #armTimeout(state: LiveSession): void {
+    if (state.timeout) clearTimeout(state.timeout);
+    const elapsed = Math.max(
+      0,
+      this.#clock.now().getTime() - new Date(state.session.startedAt).getTime()
+    );
+    const remaining = Math.max(1, state.launch.capabilityManifest.resources.wallTimeMs - elapsed);
+    state.timeout = setTimeout(() => {
+      if (state.status !== "running") return;
+      this.#terminal(state, "timed_out", "provider_wall_time_expired");
+      void state.activeQuery?.interrupt();
+      void this.#persist(state);
+    }, remaining);
+    state.timeout.unref();
+  }
+
+  async #workspaceFiles(): Promise<Record<string, string>> {
+    const root = resolve(this.#workspace);
+    const files: Record<string, string> = {};
+    let count = 0;
+    const visit = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
+        if ([".git", ".parallelplay", "node_modules"].includes(entry.name)) continue;
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await visit(path);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        count += 1;
+        if (count > 10_000) throw new Error("Provider workspace exceeded the artifact file bound");
+        const metadata = await lstat(path);
+        if (metadata.size > 100 * 1024 * 1024) {
+          throw new Error("Provider workspace artifact exceeded the file size bound");
+        }
+        const key = relative(root, path).split(sep).join("/");
+        if (!key || key.startsWith("../"))
+          throw new Error("Provider workspace path escaped its root");
+        files[key] = sha256(await readFile(path));
+      }
+    };
+    await visit(root);
+    return files;
+  }
+
+  async #appendArtifacts(state: LiveSession): Promise<void> {
+    const current = await this.#workspaceFiles();
+    const existing = new Set(
+      state.events
+        .filter((event) => event.type === "artifact.declared")
+        .map((event) => `${event.path}:${event.sha256}`)
+    );
+    for (const path of Object.keys(current).sort()) {
+      const fileDigest = current[path];
+      if (
+        !fileDigest ||
+        state.baselineFiles[path] === fileDigest ||
+        existing.has(`${path}:${fileDigest}`)
+      ) {
+        continue;
+      }
+      const bytes = await readFile(resolve(this.#workspace, path));
+      this.#append(state, {
+        type: "artifact.declared",
+        path,
+        role: "workspace.output",
+        size: bytes.length,
+        sha256: fileDigest
+      });
+    }
   }
 }

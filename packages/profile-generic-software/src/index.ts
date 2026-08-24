@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   WorkflowExtensionRequestV1Schema,
+  ExtensionManifestV1Schema,
   isAutomaticActionAllowed,
   type ExtensionManifestV1,
   type PolicyExtensionRequestV1,
@@ -23,47 +24,17 @@ function canonical(value: unknown): string {
     .join(",")}}`;
 }
 
-function builtinManifest(
-  id: string,
-  displayName: string,
-  kind: ExtensionManifestV1["kind"],
-  contract: ExtensionManifestV1["contract"]["name"]
-): ExtensionManifestV1 {
-  return {
-    schemaVersion: 1,
-    id,
-    displayName,
-    extensionVersion: "0.1.0",
-    kind,
-    contract: { name: contract, version: 1 },
-    artifact: {
-      mediaType: "application/vnd.parallelplay.builtin+json",
-      reference: `builtin:${id}`,
-      sha256: digest(`parallelplay-0.1.0:${id}`)
-    },
-    configurationSchemaDigest: digest(`${id}:configuration:v1`),
-    capabilities: [],
-    provenance: {
-      sourceRepository: "https://github.com/anirudh/parallelplay",
-      sourceRevision: digest("parallelplay-v0.1.0"),
-      sbomDigest: digest(`${id}:sbom:v1`),
-      attestationDigest: digest(`${id}:attestation:v1`)
-    },
-    conformance: {
-      suiteVersion: "0.1.0",
-      reportDigest: digest(`${id}:conformance:pending`),
-      approvedRegistryDigest: null
-    }
-  };
-}
-
 export class GenericSoftwareWorkflow implements WorkflowExtensionV1 {
-  readonly manifest = builtinManifest(
-    "generic-software",
-    "Generic software delivery",
-    "workflow",
-    "workflow-extension-v1"
-  );
+  readonly manifest: ExtensionManifestV1;
+
+  constructor(manifest: ExtensionManifestV1) {
+    this.manifest = parseManifest(
+      manifest,
+      "generic-software",
+      "workflow",
+      "workflow-extension-v1"
+    );
+  }
 
   async compile(
     request: Parameters<WorkflowExtensionV1["compile"]>[0]
@@ -127,12 +98,16 @@ export class GenericSoftwareWorkflow implements WorkflowExtensionV1 {
 }
 
 export class GenericSafetyPolicy implements PolicyExtensionV1 {
-  readonly manifest = builtinManifest(
-    "generic-safety-ceiling",
-    "Generic safety ceiling",
-    "policy",
-    "policy-extension-v1"
-  );
+  readonly manifest: ExtensionManifestV1;
+
+  constructor(manifest: ExtensionManifestV1) {
+    this.manifest = parseManifest(
+      manifest,
+      "generic-safety-ceiling",
+      "policy",
+      "policy-extension-v1"
+    );
+  }
 
   async decide(request: PolicyExtensionRequestV1): Promise<PolicyExtensionResultV1> {
     const allowed =
@@ -176,3 +151,16 @@ export const GENERIC_WALKING_SKELETON = {
     }
   ]
 };
+
+function parseManifest(
+  manifest: ExtensionManifestV1,
+  id: string,
+  kind: ExtensionManifestV1["kind"],
+  contract: ExtensionManifestV1["contract"]["name"]
+): ExtensionManifestV1 {
+  const parsed = ExtensionManifestV1Schema.parse(manifest);
+  if (parsed.id !== id || parsed.kind !== kind || parsed.contract.name !== contract) {
+    throw new Error(`${id} requires a matching ${contract} manifest`);
+  }
+  return parsed;
+}

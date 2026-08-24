@@ -8,7 +8,8 @@ export default tseslint.config(
       "**/coverage/**",
       "eslint.config.js",
       "vitest.config.ts",
-      "scripts/**/*.mjs"
+      "scripts/**/*.mjs",
+      "sandbox/**/*.mjs"
     ]
   },
   eslint.configs.recommended,

@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import {
@@ -12,10 +19,15 @@ import {
   getMigrationStatus,
   migrateDatabase,
   openKernel,
+  SqliteOutboundAuthority,
   renderTaskProjection
 } from "@parallelplay/kernel";
 import type { Command, JobState, Kernel, OutboxState, StateReference } from "@parallelplay/kernel";
 import { startAttentionServer } from "@parallelplay/attention";
+import { GitHubAppTokenProvider } from "@parallelplay/adapter-github";
+import { GuidedGitHubAppSetup } from "@parallelplay/adapter-github/guided-setup";
+import { runGitHubFixturePilot } from "@parallelplay/adapter-github/live-pilot";
+import { ExtensionManifestV1Schema } from "@parallelplay/contracts";
 import { startExplorerServer } from "@parallelplay/explorer";
 import {
   SqliteFakeAgentDriver,
@@ -325,7 +337,7 @@ function help(): object {
       "attention-budget list|show --db <path> [--program-id <uuid>] [--incident-id <uuid>]",
       "attention-measurement-report compile|list|show --db <path> --program-id <uuid> [--report-id <uuid>]",
       "attention-digest compile|list|show --db <path> --program-id <uuid> [--artifact-id <uuid>]",
-      "attention-app serve --db <path> --operator-id <id> [--port <n>]",
+      "attention-app serve --db <path> --operator-id <id> [--port <n>] [--github-manifest <path> --github-pilot-output <path>]",
       "advisor-subject approve|list|show --db <path> [--file <subject.json>] [--subject-id <uuid>]",
       "advisor-case record|list|show --db <path> [--file <case.json>] [--case-id <uuid>] [--program-id <uuid>]",
       "advisor-corpus approve|list|show --db <path> [--file <corpus.json>] [--corpus-revision-id <uuid>]",
@@ -572,11 +584,91 @@ async function runAttentionDelivery(args: ParsedArguments, once: boolean): Promi
 async function runAttentionApp(args: ParsedArguments): Promise<number> {
   const port = integerOption(args, "port", 0);
   if (port < 0 || port > 65_535) throw new CliInputError("--port must be between 0 and 65535");
-  const server = await startAttentionServer({
-    databasePath: option(args, "db"),
-    operatorId: option(args, "operator-id"),
-    port
-  });
+  const databasePath = option(args, "db");
+  const outboundAuthority = SqliteOutboundAuthority.open({ databasePath });
+  const githubSetup = new GuidedGitHubAppSetup();
+  const githubEnvironment = {
+    appId: process.env["GITHUB_APP_ID"],
+    installationId: process.env["GITHUB_APP_INSTALLATION_ID"],
+    privateKey: process.env["GITHUB_APP_PRIVATE_KEY"]
+  };
+  const environmentTokenProvider =
+    githubEnvironment.appId && githubEnvironment.installationId && githubEnvironment.privateKey
+      ? new GitHubAppTokenProvider({
+          appId: githubEnvironment.appId,
+          installationId: githubEnvironment.installationId,
+          privateKey: githubEnvironment.privateKey
+        })
+      : null;
+  const githubManifestPath = args.options.get("github-manifest");
+  const githubPilotOutput = args.options.get("github-pilot-output");
+  if ((githubManifestPath === undefined) !== (githubPilotOutput === undefined)) {
+    outboundAuthority.close();
+    throw new CliInputError(
+      "--github-manifest and --github-pilot-output must be supplied together"
+    );
+  }
+  const installedRoot = fileURLToPath(new URL("../", import.meta.url));
+  const installedFixtureManifest = join(installedRoot, "fixture", "manifest.json");
+  const fixtureManifestPath = existsSync(installedFixtureManifest)
+    ? installedFixtureManifest
+    : resolve("fixtures/parallelplay-fixture-manifest.json");
+  const fixtureManifest = readJsonFile(fixtureManifestPath, "Fixture manifest") as {
+    revisions?: { baseline?: unknown; completeTaskCandidate?: unknown };
+  };
+  const baselineCommit = fixtureManifest.revisions?.baseline;
+  const candidateCommit = fixtureManifest.revisions?.completeTaskCandidate;
+  if (
+    typeof baselineCommit !== "string" ||
+    typeof candidateCommit !== "string" ||
+    !/^[a-f0-9]{40}$/.test(baselineCommit) ||
+    !/^[a-f0-9]{40}$/.test(candidateCommit)
+  ) {
+    outboundAuthority.close();
+    throw new CliInputError("Fixture manifest does not bind the two pilot commits");
+  }
+  const githubManifest = githubManifestPath
+    ? ExtensionManifestV1Schema.parse(readJsonFile(resolve(githubManifestPath), "GitHub manifest"))
+    : null;
+  let server: Awaited<ReturnType<typeof startAttentionServer>>;
+  try {
+    server = await startAttentionServer({
+      databasePath,
+      operatorId: option(args, "operator-id"),
+      port,
+      githubSetup,
+      outboundAuthority,
+      ...(githubManifest && githubPilotOutput
+        ? {
+            githubPilot: {
+              run: async (policyPromotionDigest: string) => {
+                const output = resolve(githubPilotOutput);
+                if (existsSync(output)) throw new Error("GitHub pilot evidence already exists");
+                let tokenProvider = environmentTokenProvider;
+                tokenProvider ??= githubSetup.hostTokenProvider();
+                const evidence = await runGitHubFixturePilot({
+                  manifest: githubManifest,
+                  tokenProvider,
+                  authority: outboundAuthority,
+                  policyPromotionDigest,
+                  baselineCommit,
+                  candidateCommit
+                });
+                mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
+                writeFileSync(output, `${JSON.stringify(evidence)}\n`, {
+                  mode: 0o600,
+                  flag: "wx"
+                });
+                return evidence;
+              }
+            }
+          }
+        : {})
+    });
+  } catch (error) {
+    outboundAuthority.close();
+    throw error;
+  }
   writeJson(process.stdout, {
     ok: true,
     action: "attention_app_started",
@@ -595,6 +687,7 @@ async function runAttentionApp(args: ParsedArguments): Promise<number> {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     await server.close();
+    outboundAuthority.close();
   }
 }
 

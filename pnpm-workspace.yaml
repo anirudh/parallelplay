@@ -10,6 +10,8 @@ confirmModulesPurge: false
 
 allowBuilds:
   better-sqlite3: true
+  protobufjs: false
+  usocket: false
 
 minimumReleaseAgeExclude:
   - "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.241"

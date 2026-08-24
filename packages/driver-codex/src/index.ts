@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { Codex, type ThreadEvent, type ThreadOptions } from "@openai/codex-sdk";
+import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
+import { Codex, type ThreadOptions } from "@openai/codex-sdk";
 import {
   DriverCancelV1Schema,
   DriverEventBatchV1Schema,
@@ -10,6 +10,7 @@ import {
   DriverReceiptV1Schema,
   DriverResumeV1Schema,
   DriverSessionV1Schema,
+  ExtensionManifestV1Schema,
   type AgentDriverV1,
   type DriverCancelV1,
   type DriverEventBatchV1,
@@ -23,9 +24,73 @@ import {
 import { z } from "zod";
 
 const SDK_VERSION = "0.149.0";
-const RawEventSchema = z.looseObject({ type: z.string().min(1) });
+const MAX_PROVIDER_EVENT_BYTES = 2 * 1024 * 1024;
+const ProviderTextSchema = z.string().max(MAX_PROVIDER_EVENT_BYTES);
+const UsageSchema = z.strictObject({
+  input_tokens: z.number().int().nonnegative(),
+  cached_input_tokens: z.number().int().nonnegative(),
+  cache_write_input_tokens: z.number().int().nonnegative(),
+  output_tokens: z.number().int().nonnegative(),
+  reasoning_output_tokens: z.number().int().nonnegative()
+});
+const ThreadItemSchema = z.discriminatedUnion("type", [
+  z.looseObject({
+    id: z.string().min(1),
+    type: z.literal("agent_message"),
+    text: ProviderTextSchema
+  }),
+  z.looseObject({ id: z.string().min(1), type: z.literal("reasoning"), text: ProviderTextSchema }),
+  z.looseObject({
+    id: z.string().min(1),
+    type: z.literal("command_execution"),
+    command: ProviderTextSchema,
+    aggregated_output: ProviderTextSchema,
+    exit_code: z.number().int().optional(),
+    status: z.enum(["in_progress", "completed", "failed"])
+  }),
+  z.looseObject({
+    id: z.string().min(1),
+    type: z.literal("file_change"),
+    changes: z.array(
+      z.strictObject({ path: ProviderTextSchema, kind: z.enum(["add", "delete", "update"]) })
+    ),
+    status: z.enum(["completed", "failed"])
+  }),
+  z.looseObject({
+    id: z.string().min(1),
+    type: z.literal("mcp_tool_call"),
+    server: z.string().min(1),
+    tool: z.string().min(1),
+    arguments: z.unknown(),
+    status: z.enum(["in_progress", "completed", "failed"])
+  }),
+  z.looseObject({
+    id: z.string().min(1),
+    type: z.literal("web_search"),
+    query: ProviderTextSchema
+  }),
+  z.looseObject({
+    id: z.string().min(1),
+    type: z.literal("todo_list"),
+    items: z.array(z.strictObject({ text: ProviderTextSchema, completed: z.boolean() }))
+  }),
+  z.looseObject({ id: z.string().min(1), type: z.literal("error"), message: ProviderTextSchema })
+]);
+const CodexEventSchema = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("thread.started"), thread_id: z.string().min(1) }),
+  z.strictObject({ type: z.literal("turn.started") }),
+  z.strictObject({ type: z.literal("turn.completed"), usage: UsageSchema }),
+  z.strictObject({
+    type: z.literal("turn.failed"),
+    error: z.strictObject({ message: ProviderTextSchema })
+  }),
+  z.strictObject({ type: z.literal("item.started"), item: ThreadItemSchema }),
+  z.strictObject({ type: z.literal("item.updated"), item: ThreadItemSchema }),
+  z.strictObject({ type: z.literal("item.completed"), item: ThreadItemSchema }),
+  z.strictObject({ type: z.literal("error"), message: ProviderTextSchema })
+]);
 
-function sha256(value: string): string {
+function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
@@ -36,6 +101,14 @@ function canonical(value: unknown): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
     .join(",")}}`;
+}
+
+function parseProviderEvent(raw: unknown): z.infer<typeof CodexEventSchema> {
+  const encoded = canonical(raw);
+  if (Buffer.byteLength(encoded, "utf8") > MAX_PROVIDER_EVENT_BYTES) {
+    throw new Error("Codex provider event exceeded the validated size limit");
+  }
+  return CodexEventSchema.parse(raw);
 }
 
 interface CodexThreadLike {
@@ -52,7 +125,7 @@ interface CodexClientLike {
 }
 
 export interface CodexSdkDriverOptions {
-  image: string;
+  manifest: ExtensionManifestV1;
   brokerBaseUrl: string;
   brokerToken: string;
   workspace?: string;
@@ -71,6 +144,8 @@ interface StoredSession {
   events: DriverProtocolEventV1[];
   rawStreamDigest: string;
   rawEventCount: number;
+  seenRawEventDigests: string[];
+  baselineFiles: Record<string, string>;
   status: DriverEventBatchV1["status"];
   terminalReason: string | null;
   completedAt: string | null;
@@ -78,6 +153,8 @@ interface StoredSession {
 
 interface LiveSession extends StoredSession {
   abortController: AbortController | null;
+  timeout: NodeJS.Timeout | null;
+  persistChain: Promise<void>;
 }
 
 type PendingDriverEvent = DriverProtocolEventV1 extends infer Event
@@ -85,40 +162,6 @@ type PendingDriverEvent = DriverProtocolEventV1 extends infer Event
     ? Omit<Event, "schemaVersion" | "sequence" | "occurredAt">
     : never
   : never;
-
-function manifest(image: string): ExtensionManifestV1 {
-  if (!/^[^\s@]+@sha256:[a-f0-9]{64}$/.test(image))
-    throw new Error("Codex driver image must be digest pinned");
-  return {
-    schemaVersion: 1,
-    id: "codex-sdk",
-    displayName: "Codex SDK",
-    extensionVersion: "0.1.0",
-    kind: "driver",
-    contract: { name: "agent-driver-v1", version: 1 },
-    artifact: {
-      mediaType: "application/vnd.oci.image.manifest.v1+json",
-      reference: image,
-      sha256: image.slice(image.indexOf("sha256:") + 7)
-    },
-    configurationSchemaDigest: sha256("codex-sdk-driver-config-v1"),
-    capabilities: [
-      { name: "provider-api", required: true, detail: "Run-bound OpenAI broker grant" },
-      { name: "workspace", required: true, detail: "Contained writable workspace" }
-    ],
-    provenance: {
-      sourceRepository: "https://github.com/anirudh/parallelplay",
-      sourceRevision: sha256("parallelplay-v0.1.0"),
-      sbomDigest: sha256("codex-sdk-driver-sbom-v1"),
-      attestationDigest: sha256("codex-sdk-driver-attestation-v1")
-    },
-    conformance: {
-      suiteVersion: "0.1.0",
-      reportDigest: sha256("codex-sdk-driver-conformance-pending"),
-      approvedRegistryDigest: null
-    }
-  };
-}
 
 export class CodexSdkDriver implements AgentDriverV1 {
   readonly manifest: ExtensionManifestV1;
@@ -133,7 +176,17 @@ export class CodexSdkDriver implements AgentDriverV1 {
     if (environment["PARALLELPLAY_OCI_BOUNDARY"] !== "1") {
       throw new Error("Codex SDK driver refuses to run outside the ParallelPlay OCI boundary");
     }
-    this.manifest = manifest(options.image);
+    const manifest = ExtensionManifestV1Schema.parse(options.manifest);
+    if (
+      manifest.id !== "codex-sdk" ||
+      manifest.kind !== "driver" ||
+      manifest.contract.name !== "agent-driver-v1" ||
+      manifest.artifact.mediaType !== "application/vnd.oci.image.manifest.v1+json" ||
+      !manifest.artifact.reference.endsWith(`@sha256:${manifest.artifact.sha256}`)
+    ) {
+      throw new Error("Codex SDK driver requires a digest-pinned codex-sdk manifest");
+    }
+    this.manifest = manifest;
     this.#workspace = options.workspace ?? "/workspace";
     this.#sessionDirectory = options.sessionDirectory ?? "/session/codex";
     this.#clock = options.clock ?? { now: () => new Date() };
@@ -155,6 +208,7 @@ export class CodexSdkDriver implements AgentDriverV1 {
 
   async start(rawRequest: DriverLaunchV1): Promise<DriverSessionV1> {
     const request = DriverLaunchV1Schema.parse(rawRequest);
+    const baselineFiles = await this.#workspaceFiles();
     const sessionId = randomUUID();
     const now = this.#clock.now().toISOString();
     const session = DriverSessionV1Schema.parse({
@@ -175,14 +229,19 @@ export class CodexSdkDriver implements AgentDriverV1 {
       events: [{ schemaVersion: 1, sequence: 1, occurredAt: now, type: "started" }],
       rawStreamDigest: sha256(""),
       rawEventCount: 0,
+      seenRawEventDigests: [],
+      baselineFiles,
       status: "running",
       terminalReason: null,
       completedAt: null,
-      abortController: new AbortController()
+      abortController: new AbortController(),
+      timeout: null,
+      persistChain: Promise.resolve()
     };
     this.#sessions.set(sessionId, state);
     await this.#persist(state);
     const thread = this.#clientFactory().startThread(this.#threadOptions(request));
+    this.#armTimeout(state);
     void this.#consume(state, thread, request.prompt);
     return session;
   }
@@ -193,17 +252,28 @@ export class CodexSdkDriver implements AgentDriverV1 {
     if (state.status !== "running" || state.terminalReason !== null) {
       throw new Error("Codex session is terminal and cannot be resumed");
     }
-    if (
-      state.launch.contextDigest !== request.contextDigest ||
-      state.launch.executionContractDigest !== request.executionContractDigest ||
-      state.launch.capabilityManifestDigest !== request.capabilityManifestDigest ||
-      state.session.checkpointDigest !== request.checkpointDigest
-    ) {
-      throw new Error("Codex resume binding does not match the stored session");
+    const bindingMismatches = [
+      state.launch.contextDigest !== request.contextDigest ? "context" : null,
+      state.launch.executionContractDigest !== request.executionContractDigest
+        ? "execution-contract"
+        : null,
+      state.launch.capabilityManifestDigest !== request.capabilityManifestDigest
+        ? "capability"
+        : null,
+      state.session.checkpointDigest !== request.checkpointDigest ? "checkpoint" : null
+    ].filter(Boolean);
+    if (bindingMismatches.length > 0) {
+      const checkpointDetail = bindingMismatches.includes("checkpoint")
+        ? ` stored=${state.session.checkpointDigest ?? "null"} requested=${request.checkpointDigest}`
+        : "";
+      throw new Error(
+        `Codex resume binding does not match the stored session: ${bindingMismatches.join(",")}${checkpointDetail}`
+      );
     }
     if (!state.providerSessionId)
       throw new Error("Codex provider session has not emitted its resume identity");
     state.abortController = new AbortController();
+    this.#armTimeout(state);
     const thread = this.#clientFactory().resumeThread(
       state.providerSessionId,
       this.#threadOptions(state.launch)
@@ -219,6 +289,7 @@ export class CodexSdkDriver implements AgentDriverV1 {
   async inspect(rawRequest: Parameters<AgentDriverV1["inspect"]>[0]): Promise<DriverEventBatchV1> {
     const request = DriverInspectV1Schema.parse(rawRequest);
     const state = await this.#get(request.sessionId);
+    await this.#awaitPersistence(state);
     return DriverEventBatchV1Schema.parse({
       schemaVersion: 1,
       afterSequence: request.afterSequence,
@@ -233,6 +304,7 @@ export class CodexSdkDriver implements AgentDriverV1 {
     const request = DriverCancelV1Schema.parse(rawRequest);
     const state = await this.#get(request.sessionId);
     if (state.status === "running") {
+      if (state.timeout) clearTimeout(state.timeout);
       state.abortController?.abort();
       this.#terminal(state, request.reason, request.reason.replaceAll("_", " "));
       await this.#persist(state);
@@ -242,6 +314,7 @@ export class CodexSdkDriver implements AgentDriverV1 {
 
   async collectReceipt(sessionId: string): Promise<DriverReceiptV1> {
     const state = await this.#get(sessionId);
+    await this.#awaitPersistence(state);
     if (state.status === "running" || !state.completedAt || !state.terminalReason) {
       throw new Error("Codex receipt is unavailable before a terminal event");
     }
@@ -295,9 +368,15 @@ export class CodexSdkDriver implements AgentDriverV1 {
       const signal = state.abortController?.signal;
       const streamed = await thread.runStreamed(prompt, signal ? { signal } : undefined);
       for await (const raw of streamed.events) {
-        const event = RawEventSchema.parse(raw) as ThreadEvent;
+        const event = parseProviderEvent(raw);
         state.rawStreamDigest = sha256(`${state.rawStreamDigest}:${canonical(event)}`);
         state.rawEventCount += 1;
+        const rawEventDigest = sha256(canonical(event));
+        if (state.seenRawEventDigests.includes(rawEventDigest)) {
+          await this.#persist(state);
+          continue;
+        }
+        state.seenRawEventDigests.push(rawEventDigest);
         if (event.type === "thread.started") {
           state.providerSessionId = event.thread_id;
           const checkpointDigest = sha256(
@@ -312,6 +391,7 @@ export class CodexSdkDriver implements AgentDriverV1 {
           state.session = DriverSessionV1Schema.parse({ ...state.session, checkpointDigest });
           this.#append(state, { type: "checkpoint", checkpointDigest });
         } else if (event.type === "turn.completed") {
+          await this.#appendArtifacts(state);
           this.#append(state, {
             type: "usage",
             provider: "openai",
@@ -331,7 +411,7 @@ export class CodexSdkDriver implements AgentDriverV1 {
           this.#terminal(
             state,
             "failed",
-            event.type === "error" ? event.message : event.error.message
+            event.type === "error" ? "codex_stream_error" : "codex_turn_failed"
           );
         }
         await this.#persist(state);
@@ -340,13 +420,26 @@ export class CodexSdkDriver implements AgentDriverV1 {
         this.#terminal(state, "protocol_invalid", "Codex stream ended without terminal event");
     } catch (error) {
       if (state.status === "running") {
+        const protocolInvalid =
+          error instanceof z.ZodError ||
+          (error instanceof Error && error.message.includes("validated size limit"));
         this.#terminal(
           state,
-          state.abortController?.signal.aborted ? "operator_cancelled" : "failed",
-          error instanceof Error ? error.message : String(error)
+          state.abortController?.signal.aborted
+            ? "operator_cancelled"
+            : protocolInvalid
+              ? "protocol_invalid"
+              : "failed",
+          state.abortController?.signal.aborted
+            ? "operator_cancelled"
+            : protocolInvalid
+              ? "provider_event_protocol_invalid"
+              : "provider_execution_failed"
         );
       }
     }
+    if (state.timeout) clearTimeout(state.timeout);
+    state.timeout = null;
     await this.#persist(state);
   }
 
@@ -365,6 +458,8 @@ export class CodexSdkDriver implements AgentDriverV1 {
     state.status = terminalOutcome;
     state.terminalReason = reason.slice(0, 1000) || "No terminal reason supplied";
     state.completedAt = this.#clock.now().toISOString();
+    if (state.timeout) clearTimeout(state.timeout);
+    state.timeout = null;
     this.#append(state, {
       type: "terminal",
       outcome: terminalOutcome,
@@ -373,27 +468,30 @@ export class CodexSdkDriver implements AgentDriverV1 {
   }
 
   async #persist(state: LiveSession): Promise<void> {
-    await mkdir(this.#sessionDirectory, { recursive: true, mode: 0o700 });
-    const stored: StoredSession = {
-      schemaVersion: state.schemaVersion,
-      session: state.session,
-      providerSessionId: state.providerSessionId,
-      prompt: state.prompt,
-      launch: state.launch,
-      events: state.events,
-      rawStreamDigest: state.rawStreamDigest,
-      rawEventCount: state.rawEventCount,
-      status: state.status,
-      terminalReason: state.terminalReason,
-      completedAt: state.completedAt
-    };
-    await writeFile(
-      join(this.#sessionDirectory, `${state.session.sessionId}.json`),
-      canonical(stored),
-      {
-        mode: 0o600
-      }
-    );
+    const operation = state.persistChain.then(async () => {
+      await mkdir(this.#sessionDirectory, { recursive: true, mode: 0o700 });
+      const stored: StoredSession = {
+        schemaVersion: state.schemaVersion,
+        session: state.session,
+        providerSessionId: state.providerSessionId,
+        prompt: state.prompt,
+        launch: state.launch,
+        events: state.events,
+        rawStreamDigest: state.rawStreamDigest,
+        rawEventCount: state.rawEventCount,
+        seenRawEventDigests: state.seenRawEventDigests,
+        baselineFiles: state.baselineFiles,
+        status: state.status,
+        terminalReason: state.terminalReason,
+        completedAt: state.completedAt
+      };
+      const path = join(this.#sessionDirectory, `${state.session.sessionId}.json`);
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      await writeFile(temporary, canonical(stored), { mode: 0o600 });
+      await rename(temporary, path);
+    });
+    state.persistChain = operation;
+    await operation;
   }
 
   async #get(sessionId: string): Promise<LiveSession> {
@@ -402,8 +500,95 @@ export class CodexSdkDriver implements AgentDriverV1 {
     const stored = JSON.parse(
       await readFile(join(this.#sessionDirectory, `${sessionId}.json`), "utf8")
     ) as StoredSession;
-    const state: LiveSession = { ...stored, abortController: null };
+    const state: LiveSession = {
+      ...stored,
+      seenRawEventDigests: stored.seenRawEventDigests,
+      baselineFiles: stored.baselineFiles,
+      abortController: null,
+      timeout: null,
+      persistChain: Promise.resolve()
+    };
     this.#sessions.set(sessionId, state);
     return state;
+  }
+
+  async #awaitPersistence(state: LiveSession): Promise<void> {
+    for (;;) {
+      const pending = state.persistChain;
+      await pending;
+      if (pending === state.persistChain) return;
+    }
+  }
+
+  #armTimeout(state: LiveSession): void {
+    if (state.timeout) clearTimeout(state.timeout);
+    const elapsed = Math.max(
+      0,
+      this.#clock.now().getTime() - new Date(state.session.startedAt).getTime()
+    );
+    const remaining = Math.max(1, state.launch.capabilityManifest.resources.wallTimeMs - elapsed);
+    state.timeout = setTimeout(() => {
+      if (state.status !== "running") return;
+      this.#terminal(state, "timed_out", "provider_wall_time_expired");
+      state.abortController?.abort();
+      void this.#persist(state);
+    }, remaining);
+    state.timeout.unref();
+  }
+
+  async #workspaceFiles(): Promise<Record<string, string>> {
+    const root = resolve(this.#workspace);
+    const files: Record<string, string> = {};
+    let count = 0;
+    const visit = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
+        if ([".git", ".parallelplay", "node_modules"].includes(entry.name)) continue;
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await visit(path);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        count += 1;
+        if (count > 10_000) throw new Error("Provider workspace exceeded the artifact file bound");
+        const metadata = await lstat(path);
+        if (metadata.size > 100 * 1024 * 1024) {
+          throw new Error("Provider workspace artifact exceeded the file size bound");
+        }
+        const key = relative(root, path).split(sep).join("/");
+        if (!key || key.startsWith("../"))
+          throw new Error("Provider workspace path escaped its root");
+        files[key] = sha256(await readFile(path));
+      }
+    };
+    await visit(root);
+    return files;
+  }
+
+  async #appendArtifacts(state: LiveSession): Promise<void> {
+    const current = await this.#workspaceFiles();
+    const existing = new Set(
+      state.events
+        .filter((event) => event.type === "artifact.declared")
+        .map((event) => `${event.path}:${event.sha256}`)
+    );
+    for (const path of Object.keys(current).sort()) {
+      const fileDigest = current[path];
+      if (
+        !fileDigest ||
+        state.baselineFiles[path] === fileDigest ||
+        existing.has(`${path}:${fileDigest}`)
+      ) {
+        continue;
+      }
+      const bytes = await readFile(resolve(this.#workspace, path));
+      this.#append(state, {
+        type: "artifact.declared",
+        path,
+        role: "workspace.output",
+        size: bytes.length,
+        sha256: fileDigest
+      });
+    }
   }
 }

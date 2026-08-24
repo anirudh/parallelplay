@@ -21,6 +21,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@parallelplay/kernel": "workspace:*"
+    "@parallelplay/kernel": "workspace:*",
+    "@parallelplay/ui": "workspace:*"
   }
 }

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { buildRelease } from "./build-release.mjs";
-import { readTarGz } from "./archive.mjs";
+import { readTar, readTarGz } from "./archive.mjs";
 
 const forbiddenNames = [["staff", "plane"].join(""), ["hob", "bes"].join("")];
 
@@ -77,11 +77,42 @@ export function inspectRelease(directory) {
           failures.push(`${name}: excluded predecessor identity entered ${entry.path}`);
       }
     }
+    if (name.includes("cli-")) {
+      for (const launcher of [
+        "parallelplay",
+        "parallelplay-keyless-pilot",
+        "parallelplay-notification-trial",
+        "parallelplay-provider-trial"
+      ]) {
+        if (!entries.some((entry) => entry.path.endsWith(`/bin/${launcher}`))) {
+          failures.push(`${name}: ${launcher} launcher is missing`);
+        }
+      }
+      if (!entries.some((entry) => entry.path.endsWith("/fixture/manifest.json"))) {
+        failures.push(`${name}: fixture manifest is missing`);
+      }
+    }
     if (
       name.includes("cli-") &&
-      !entries.some((entry) => entry.path.endsWith("/bin/parallelplay"))
+      process.env.PARALLELPLAY_REQUIRE_PROVIDER_IMAGES === "1" &&
+      !entries.some((entry) => entry.path.endsWith("/oci/provider-runner.oci.tar"))
     ) {
-      failures.push(`${name}: CLI launcher is missing`);
+      failures.push(`${name}: provider runner OCI layout is missing`);
+    }
+  }
+  for (const name of readdirSync(root)
+    .filter((entry) => entry.endsWith(".oci.tar"))
+    .sort()) {
+    const entries = readTar(readFileSync(join(root, name)));
+    const index = entries.find((entry) => entry.path === "index.json");
+    const layout = entries.find((entry) => entry.path === "oci-layout");
+    if (!index || !layout) {
+      failures.push(`${name}: OCI index or layout is missing`);
+      continue;
+    }
+    const value = JSON.parse(index.data.toString("utf8"));
+    if (!value.manifests?.some((entry) => /^sha256:[a-f0-9]{64}$/.test(entry.digest))) {
+      failures.push(`${name}: OCI index has no immutable image manifest`);
     }
   }
   if (failures.length) throw new Error([...new Set(failures)].sort().join("\n"));

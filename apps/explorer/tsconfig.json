@@ -7,5 +7,9 @@
     "lib": ["ES2023", "DOM"]
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/kernel" }, { "path": "../../packages/runtime" }]
+  "references": [
+    { "path": "../../packages/kernel" },
+    { "path": "../../packages/runtime" },
+    { "path": "../../packages/ui" }
+  ]
 }

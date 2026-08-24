@@ -10,3 +10,4 @@ coverage/
 .parallelplay-sandbox-image
 .parallelplay-release/
 .parallelplay-conformance/
+.parallelplay-provider-images/

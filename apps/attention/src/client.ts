@@ -3,7 +3,9 @@ import type {
   AttentionSnapshotV1,
   AttentionSnapshotV2,
   CommandResult,
-  DecisionAudit
+  DecisionAudit,
+  OutboundAuthoritySnapshotV1,
+  OutboundPolicyPromotionV1
 } from "@parallelplay/kernel";
 
 export interface AttentionSession {
@@ -148,6 +150,52 @@ export class AttentionClient {
       idempotencyKey,
       reason
     });
+  }
+
+  startGitHubSetup(): Promise<{ launchPath: string }> {
+    return this.#request<{ launchPath: string }>("/api/github/setup/start", {
+      method: "POST",
+      body: {}
+    });
+  }
+
+  verifyGitHubInstallation(installationId: string): Promise<{ repository: string }> {
+    return this.#request<{ repository: string }>("/api/github/setup/installation", {
+      method: "POST",
+      body: { installationId }
+    });
+  }
+
+  outboundSnapshot(): Promise<OutboundAuthoritySnapshotV1> {
+    return this.#request<OutboundAuthoritySnapshotV1>("/api/outbound", { method: "GET" });
+  }
+
+  promoteFixtureGitHubPolicy(
+    policyRevisionId = crypto.randomUUID()
+  ): Promise<OutboundPolicyPromotionV1> {
+    return this.#writeOutbound<OutboundPolicyPromotionV1>("/api/outbound/github-policy/promote", {
+      policyRevisionId,
+      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      confirmation: "Promote fixture-only GitHub effects"
+    });
+  }
+
+  suspendFixtureGitHubPolicy(promotionDigest: string): Promise<OutboundAuthoritySnapshotV1> {
+    return this.#writeOutbound<OutboundAuthoritySnapshotV1>("/api/outbound/github-policy/suspend", {
+      promotionDigest,
+      reason: "Operator suspended the fixture-only GitHub pilot policy"
+    });
+  }
+
+  runFixtureGitHubPilot(promotionDigest: string): Promise<unknown> {
+    return this.#writeOutbound<unknown>("/api/github/pilot/run", {
+      promotionDigest,
+      confirmation: "Run fixture-only GitHub pilot"
+    });
+  }
+
+  #writeOutbound<T>(path: string, body: Record<string, unknown>): Promise<T> {
+    return this.#request<T>(path, { method: "POST", body });
   }
 
   #write(path: string, body: Record<string, unknown>): Promise<CommandResult> {

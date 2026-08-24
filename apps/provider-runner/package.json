@@ -1,0 +1,16 @@
+{
+  "name": "@parallelplay/provider-runner",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@parallelplay/contracts": "workspace:*",
+    "@parallelplay/driver-claude": "workspace:*",
+    "@parallelplay/driver-codex": "workspace:*",
+    "zod": "4.4.3"
+  }
+}

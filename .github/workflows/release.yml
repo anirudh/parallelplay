@@ -2,13 +2,75 @@ name: release
 
 on:
   push:
-    tags: ["v0.1.0"]
+    tags: ["v0.1.0-rc.*"]
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: Stable candidate version to build without publishing
+        required: true
+        default: 0.1.0
+        type: choice
+        options: [0.1.0]
 
 permissions:
   contents: read
 
 jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.17.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+
+  provider-images:
+    needs: verify
+    name: provider-images-${{ matrix.id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x64
+            runner: ubuntu-24.04
+          - id: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Bind release version and provider platform
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="${{ inputs.release_version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "PARALLELPLAY_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "PARALLELPLAY_PROVIDER_PLATFORM=${{ matrix.id }}" >> "$GITHUB_ENV"
+      - run: node scripts/provider/build-images.mjs .parallelplay-provider-images/first
+      - run: node scripts/provider/build-images.mjs .parallelplay-provider-images/second
+      - run: node scripts/provider/verify-images-reproducible.mjs .parallelplay-provider-images/first .parallelplay-provider-images/second
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: provider-images-${{ matrix.id }}
+          path: .parallelplay-provider-images/first/*
+          if-no-files-found: error
+
   build:
+    needs: [verify, provider-images]
     name: build-${{ matrix.id }}
     strategy:
       fail-fast: false
@@ -17,12 +79,15 @@ jobs:
           - id: macos-arm64
             runner: macos-14
             mode: platform
+            provider_images: linux-arm64
           - id: linux-x64
             runner: ubuntu-24.04
             mode: base
+            provider_images: linux-x64
           - id: linux-arm64
             runner: ubuntu-24.04-arm
             mode: platform
+            provider_images: linux-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -38,8 +103,26 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: provider-images-${{ matrix.provider_images }}
+          path: .parallelplay-provider-images
+      - name: Bind release version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="${{ inputs.release_version }}"
+            tag="v$version"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "PARALLELPLAY_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "PARALLELPLAY_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "PARALLELPLAY_PROVIDER_IMAGES_DIRECTORY=$GITHUB_WORKSPACE/.parallelplay-provider-images" >> "$GITHUB_ENV"
+          echo "PARALLELPLAY_REQUIRE_PROVIDER_IMAGES=1" >> "$GITHUB_ENV"
       - run: node scripts/release/verify-reproducible.mjs
-      - run: node scripts/release/build-release.mjs .parallelplay-release/platform
+      - run: node scripts/release/build-release.mjs --output .parallelplay-release/platform
       - run: node scripts/release/stage-platform-assets.mjs .parallelplay-release/platform .parallelplay-release/upload ${{ matrix.mode }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -47,14 +130,15 @@ jobs:
           path: .parallelplay-release/upload/*
           if-no-files-found: error
 
-  publish:
+  assemble:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -64,10 +148,134 @@ jobs:
           pattern: release-*
           path: release-assets
           merge-multiple: true
+      - name: Bind release version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="${{ inputs.release_version }}"
+            tag="v$version"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "PARALLELPLAY_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "PARALLELPLAY_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
       - run: node scripts/release/aggregate-release.mjs release-assets
-      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+      - id: attest-primary
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: release-assets/*
+      - name: Retain the primary artifact attestation bundle
+        shell: bash
+        run: cp "${{ steps.attest-primary.outputs.bundle-path }}" "release-assets/parallelplay-primary-attestation-${PARALLELPLAY_RELEASE_VERSION}.jsonl"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: primary-release-assets
+          path: release-assets/*
+          if-no-files-found: error
+
+  conformance:
+    needs: assemble
+    name: conformance-${{ matrix.id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x64
+            runner: ubuntu-24.04
+          - id: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.17.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: primary-release-assets
+          path: release-assets
+      - name: Bind release version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="${{ inputs.release_version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "PARALLELPLAY_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+      - run: node scripts/conformance/run-first-party.mjs release-assets "$GITHUB_SHA" "release-assets/parallelplay-primary-attestation-${PARALLELPLAY_RELEASE_VERSION}.jsonl"
+        env:
+          PARALLELPLAY_CONFORMANCE_PLATFORM: ${{ matrix.id }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: conformance-${{ matrix.id }}
+          path: |
+            release-assets/parallelplay-conformance-evidence-*.tar.gz
+            release-assets/parallelplay-conformance-evidence-*.tar.gz.spdx.json
+            release-assets/parallelplay-extension-manifests-*.tar.gz
+            release-assets/parallelplay-extension-manifests-*.tar.gz.spdx.json
+            release-assets/parallelplay-first-party-proposed-*.json
+          if-no-files-found: error
+
+  finalize:
+    needs: conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: primary-release-assets
+          path: release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: conformance-*
+          path: release-assets
+          merge-multiple: true
+      - name: Bind release version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="${{ inputs.release_version }}"
+            tag="v$version"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "PARALLELPLAY_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "PARALLELPLAY_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+      - run: node scripts/release/aggregate-release.mjs release-assets
+      - uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: release-assets/*
+      - if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stable-candidate-release
+          path: release-assets/*
+          if-no-files-found: error
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --title "ParallelPlay 0.1.0" --notes-file CHANGELOG.md
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          args=("$GITHUB_REF_NAME" release-assets/* --verify-tag --title "ParallelPlay ${GITHUB_REF_NAME#v}" --notes-file CHANGELOG.md)
+          args+=(--prerelease)
+          gh release create "${args[@]}"

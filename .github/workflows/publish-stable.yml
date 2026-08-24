@@ -1,0 +1,78 @@
+name: publish-stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful stable-candidate release workflow run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.17.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: stable-candidate-release
+          path: release-assets
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify the human-approved frozen extension set
+        shell: bash
+        run: |
+          proposals=(release-assets/parallelplay-first-party-proposed-0.1.0-linux-*.json)
+          test "${#proposals[@]}" -eq 2
+          node scripts/compatibility/verify-approved.mjs "${proposals[@]}"
+          node scripts/release/verify-frozen-candidate.mjs release-assets "${proposals[@]}"
+          grep -Fq 'Verdict: **READY' docs/SLICE10_READINESS.md
+      - name: Refresh only the source archive from the approved release commit
+        env:
+          PARALLELPLAY_RELEASE_VERSION: 0.1.0
+          PARALLELPLAY_RELEASE_TAG: v0.1.0
+        shell: bash
+        run: |
+          node scripts/release/build-release.mjs --output .parallelplay-release/source-refresh
+          cp .parallelplay-release/source-refresh/parallelplay-0.1.0-source.tar.gz release-assets/
+          cp .parallelplay-release/source-refresh/parallelplay-0.1.0-source.tar.gz.spdx.json release-assets/
+          node scripts/release/aggregate-release.mjs release-assets
+          node scripts/release/inspect-existing-release.mjs release-assets
+      - uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: release-assets/*
+      - name: Publish the exact stable release under standing approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release create v0.1.0 release-assets/* --target "$GITHUB_SHA" --title "ParallelPlay 0.1.0" --notes-file CHANGELOG.md
+      - name: Verify attestations as a consumer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          while IFS= read -r file; do
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY"
+          done < <(find release-assets -maxdepth 1 -type f -print | sort)

@@ -1,8 +1,36 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ExtensionManifestV1 } from "@parallelplay/contracts";
 import { describe, expect, it } from "vitest";
 import { CodexSdkDriver } from "./index.js";
+
+const codexManifest: ExtensionManifestV1 = {
+  schemaVersion: 1,
+  id: "codex-sdk",
+  displayName: "Codex SDK",
+  extensionVersion: "0.1.0",
+  kind: "driver",
+  contract: { name: "agent-driver-v1", version: 1 },
+  artifact: {
+    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    reference: `codex@sha256:${"a".repeat(64)}`,
+    sha256: "a".repeat(64)
+  },
+  configurationSchemaDigest: "b".repeat(64),
+  capabilities: [],
+  provenance: {
+    sourceRepository: "https://github.com/anirudh/parallelplay",
+    sourceRevision: "c".repeat(64),
+    sbomDigest: "d".repeat(64),
+    attestationDigest: "e".repeat(64)
+  },
+  conformance: {
+    suiteVersion: "0.1.0",
+    reportDigest: "f".repeat(64),
+    approvedRegistryDigest: null
+  }
+};
 
 async function eventually<T>(operation: () => Promise<T>): Promise<T> {
   let last: unknown;
@@ -22,7 +50,7 @@ describe("Codex SDK driver", () => {
     expect(
       () =>
         new CodexSdkDriver({
-          image: `codex@sha256:${"a".repeat(64)}`,
+          manifest: codexManifest,
           brokerBaseUrl: "http://broker",
           brokerToken: "grant",
           environment: {}
@@ -33,7 +61,7 @@ describe("Codex SDK driver", () => {
   it("normalizes structured SDK events into a digest-bound receipt", async () => {
     const sessionDirectory = await mkdtemp(join(tmpdir(), "parallelplay-codex-"));
     const driver = new CodexSdkDriver({
-      image: `codex@sha256:${"a".repeat(64)}`,
+      manifest: codexManifest,
       brokerBaseUrl: "http://broker",
       brokerToken: "grant",
       sessionDirectory,
@@ -115,5 +143,66 @@ describe("Codex SDK driver", () => {
       "usage",
       "terminal"
     ]);
+  });
+
+  it("fails closed on malformed provider events without retaining provider text", async () => {
+    const sessionDirectory = await mkdtemp(join(tmpdir(), "parallelplay-codex-malformed-"));
+    const driver = new CodexSdkDriver({
+      manifest: codexManifest,
+      brokerBaseUrl: "http://broker",
+      brokerToken: "grant",
+      sessionDirectory,
+      environment: { PARALLELPLAY_OCI_BOUNDARY: "1" },
+      clientFactory: () => ({
+        startThread: () => ({
+          id: null,
+          runStreamed: () =>
+            Promise.resolve({
+              events: (async function* () {
+                yield {
+                  type: "thread.started",
+                  thread_id: "thread-1",
+                  secret: ["do", "not", "retain"].join("-")
+                };
+              })()
+            })
+        }),
+        resumeThread: () => {
+          throw new Error("not used");
+        }
+      })
+    });
+    const session = await driver.start({
+      schemaVersion: 1,
+      effectKey: "codex-malformed",
+      runId: "10000000-0000-4000-8000-000000000001",
+      jobId: "10000000-0000-4000-8000-000000000002",
+      attemptId: "10000000-0000-4000-8000-000000000003",
+      contextDigest: "a".repeat(64),
+      executionContractDigest: "b".repeat(64),
+      capabilityManifest: {
+        schemaVersion: 3,
+        workspace: "read_only",
+        artifactOutput: "read_write",
+        scratch: "read_write",
+        context: { access: "read_only", digest: "a".repeat(64) },
+        resources: {
+          cpuLimit: 1,
+          memoryLimitBytes: 268_435_456,
+          pidsLimit: 64,
+          wallTimeMs: 60_000
+        },
+        network: [],
+        secretHandles: [],
+        git: []
+      },
+      capabilityManifestDigest: "c".repeat(64),
+      prompt: "test malformed event",
+      requestedModel: "codex-test"
+    });
+    const receipt = await eventually(() => driver.collectReceipt(session.sessionId));
+    expect(receipt.outcome).toBe("protocol_invalid");
+    expect(receipt.terminalReason).toBe("provider_event_protocol_invalid");
+    expect(JSON.stringify(receipt)).not.toContain("do-not-retain");
   });
 });

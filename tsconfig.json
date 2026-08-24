@@ -8,12 +8,16 @@
     { "path": "./packages/driver-generic-command" },
     { "path": "./packages/driver-codex" },
     { "path": "./packages/driver-claude" },
+    { "path": "./packages/evaluator-deterministic" },
     { "path": "./packages/adapter-github" },
     { "path": "./packages/adapter-notifications" },
     { "path": "./packages/telemetry" },
+    { "path": "./packages/ui" },
     { "path": "./packages/profile-generic-software" },
     { "path": "./apps/explorer" },
     { "path": "./apps/attention" },
+    { "path": "./apps/provider-relay" },
+    { "path": "./apps/provider-runner" },
     { "path": "./apps/cli" }
   ]
 }

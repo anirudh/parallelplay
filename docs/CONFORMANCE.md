@@ -10,4 +10,8 @@ Run the source suite with:
 pnpm conformance
 ```
 
+Release conformance uses a fresh extension instance for every requirement and fails on any missing, duplicated, skipped, or unexpected requirement ID. It emits exactly nine first-party reports: generic-command, Codex, Claude, workflow, deterministic evaluator, policy ceiling, GitHub, desktop notification, and signed webhook. The reports contain 96 isolated case results in total.
+
+The release workflow runs `scripts/conformance/run-first-party.mjs` only after exact artifacts, per-artifact SBOMs, the source commit, platform, and the primary GitHub attestation bundle exist. Its detached manifests live outside the artifacts they describe, avoiding self-referential digests.
+
 The canonical failure classifications are documented in [FAILURE_SEMANTICS.md](./FAILURE_SEMANTICS.md).

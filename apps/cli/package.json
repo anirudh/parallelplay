@@ -15,6 +15,9 @@
   },
   "dependencies": {
     "@parallelplay/attention": "workspace:*",
+    "@parallelplay/adapter-github": "workspace:*",
+    "@parallelplay/adapter-notifications": "workspace:*",
+    "@parallelplay/contracts": "workspace:*",
     "@parallelplay/explorer": "workspace:*",
     "@parallelplay/kernel": "workspace:*",
     "@parallelplay/runtime": "workspace:*"

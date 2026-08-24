@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { request } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalDigest, migrateDatabase, openKernel } from "@parallelplay/kernel";
+import type { OutboundPolicyV1 } from "@parallelplay/kernel";
 import { startAttentionServer } from "./index.js";
 
 const ids = {
@@ -95,6 +96,121 @@ afterEach(() => {
 });
 
 describe("secure local attention application", () => {
+  it("binds the fixture GitHub policy to an exact operator, ceiling, target, and expiry", async () => {
+    const databasePath = await fixture();
+    const promotions: unknown[] = [];
+    const suspensions: unknown[] = [];
+    const outboundAuthority = {
+      snapshot: () => ({
+        schemaVersion: 1 as const,
+        throughPosition: 0,
+        policies: [],
+        effects: [],
+        eventDigest: "0".repeat(64)
+      }),
+      promotePolicy: (policy: OutboundPolicyV1, actor: { kind: "operator"; id: string }) => {
+        promotions.push({ policy, actor });
+        return {
+          schemaVersion: 1 as const,
+          policy,
+          policyDigest: "1".repeat(64),
+          promotionDigest: "2".repeat(64),
+          promotedBy: actor.id,
+          promotedAt: new Date().toISOString(),
+          status: "active" as const,
+          suspendedAt: null,
+          suspensionReason: null
+        };
+      },
+      suspendPolicy: (promotionDigest: string, reason: string) => {
+        suspensions.push({ promotionDigest, reason });
+      }
+    };
+    const server = await startAttentionServer({
+      databasePath,
+      operatorId: "policy-operator",
+      outboundAuthority,
+      port: 0
+    });
+    try {
+      const bootstrapUrl = new URL(server.bootstrapUrl);
+      const token = new URLSearchParams(bootstrapUrl.hash.slice(1)).get("bootstrap");
+      const bootstrap = await fetch(`${server.origin}/api/bootstrap`, {
+        method: "POST",
+        headers: { "content-type": "application/json", Origin: server.origin },
+        body: JSON.stringify({ token })
+      });
+      const cookie = bootstrap.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+      const session = (await bootstrap.json()) as { data: { csrfToken: string } };
+      const headers = {
+        Cookie: cookie,
+        Origin: server.origin,
+        "x-csrf-token": session.data.csrfToken,
+        "content-type": "application/json"
+      };
+      const policyRevisionId = "72000000-0000-4000-8000-000000000099";
+      const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+      const promotion = await fetch(`${server.origin}/api/outbound/github-policy/promote`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          policyRevisionId,
+          expiresAt,
+          confirmation: "Promote fixture-only GitHub effects"
+        })
+      });
+      expect(promotion.status).toBe(200);
+      expect(promotions).toEqual([
+        {
+          actor: { kind: "operator", id: "policy-operator" },
+          policy: {
+            schemaVersion: 1,
+            policyRevisionId,
+            name: "Fixture-only GitHub pilot",
+            allowedActions: [
+              "github.check.upsert",
+              "github.label.upsert",
+              "github.comment.create",
+              "github.candidate-branch.create",
+              "github.draft-pr.create",
+              "github.draft-pr.update"
+            ],
+            targets: ["anirudh/parallelplay-fixture"],
+            expiresAt
+          }
+        }
+      ]);
+      expect(
+        (
+          await fetch(`${server.origin}/api/outbound/github-policy/promote`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              policyRevisionId,
+              expiresAt,
+              confirmation: "yes"
+            })
+          })
+        ).status
+      ).toBe(400);
+      expect(
+        (
+          await fetch(`${server.origin}/api/outbound/github-policy/suspend`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              promotionDigest: "2".repeat(64),
+              reason: "Pilot complete"
+            })
+          })
+        ).status
+      ).toBe(200);
+      expect(suspensions).toEqual([{ promotionDigest: "2".repeat(64), reason: "Pilot complete" }]);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("enforces fragment bootstrap, session, host, origin, CSRF, and typed writes", async () => {
     const databasePath = await fixture();
     let server = await startAttentionServer({

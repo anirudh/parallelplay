@@ -13,6 +13,8 @@ export interface ProviderBrokerGrant {
   readonly model: string;
   readonly expiresAt: string;
   readonly endpoint: string;
+  readonly maxBudgetUsd: number | null;
+  readonly maxOutputTokensPerRequest: number | null;
   readonly grantDigest: string;
 }
 
@@ -24,6 +26,8 @@ export interface ProviderBrokerOptions {
   maxRequestBytes?: number;
   maxResponseBytes?: number;
   maxRequestsPerGrant?: number;
+  listenHost?: string;
+  advertisedHost?: string;
 }
 
 interface StoredGrant {
@@ -33,7 +37,14 @@ interface StoredGrant {
   secretHandleId: string;
   expiresAt: string;
   remainingRequests: number;
+  remainingBudgetUsd: number | null;
+  inputUsdPerMillion: number | null;
+  outputUsdPerMillion: number | null;
+  maxOutputTokensPerRequest: number | null;
 }
+
+const DEFAULT_MAX_OUTPUT_TOKENS_PER_REQUEST = 16_384;
+const MAX_OUTPUT_TOKENS_PER_REQUEST = 1_000_000;
 
 const PROVIDER_PATHS: Record<ProviderName, RegExp> = {
   openai: /^\/v1\/(?:responses|responses\/[A-Za-z0-9_-]+|models\/[A-Za-z0-9._-]+)$/,
@@ -64,6 +75,8 @@ export class ProviderEgressBroker {
   readonly #maxRequestBytes: number;
   readonly #maxResponseBytes: number;
   readonly #maxRequestsPerGrant: number;
+  readonly #listenHost: string;
+  readonly #advertisedHost: string;
   readonly #grants = new Map<string, StoredGrant>();
   #server: Server | null = null;
 
@@ -78,6 +91,8 @@ export class ProviderEgressBroker {
     this.#maxRequestBytes = options.maxRequestBytes ?? 8 * 1024 * 1024;
     this.#maxResponseBytes = options.maxResponseBytes ?? 16 * 1024 * 1024;
     this.#maxRequestsPerGrant = options.maxRequestsPerGrant ?? 128;
+    this.#listenHost = options.listenHost ?? "127.0.0.1";
+    this.#advertisedHost = options.advertisedHost ?? this.#listenHost;
   }
 
   async start(): Promise<string> {
@@ -94,10 +109,10 @@ export class ProviderEgressBroker {
       const server = this.#server;
       if (!server) return reject(new Error("Provider broker server disappeared"));
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => resolve());
+      server.listen(0, this.#listenHost, () => resolve());
     });
     const address = this.#server.address() as AddressInfo;
-    return `http://127.0.0.1:${String(address.port)}`;
+    return `http://${this.#advertisedHost}:${String(address.port)}`;
   }
 
   issueGrant(options: {
@@ -106,11 +121,38 @@ export class ProviderEgressBroker {
     model: string;
     secretEnvironmentName: string;
     ttlMs?: number;
+    maxBudgetUsd?: number;
+    inputUsdPerMillion?: number;
+    outputUsdPerMillion?: number;
+    maxOutputTokensPerRequest?: number;
   }): ProviderBrokerGrant {
     if (!this.#server) throw new Error("Provider broker must be started before grants are issued");
     const now = this.#clock.now();
     const ttlMs = options.ttlMs ?? 15 * 60_000;
     if (ttlMs < 1_000 || ttlMs > 86_400_000) throw new TypeError("Grant TTL is invalid");
+    const hasBudget = options.maxBudgetUsd !== undefined;
+    if (
+      hasBudget &&
+      (!options.maxBudgetUsd ||
+        options.maxBudgetUsd <= 0 ||
+        !options.inputUsdPerMillion ||
+        options.inputUsdPerMillion <= 0 ||
+        !options.outputUsdPerMillion ||
+        options.outputUsdPerMillion <= 0)
+    ) {
+      throw new TypeError("Budgeted grants require positive budget and pricing bounds");
+    }
+    if (
+      options.maxOutputTokensPerRequest !== undefined &&
+      (!Number.isSafeInteger(options.maxOutputTokensPerRequest) ||
+        options.maxOutputTokensPerRequest <= 0 ||
+        options.maxOutputTokensPerRequest > MAX_OUTPUT_TOKENS_PER_REQUEST)
+    ) {
+      throw new TypeError("Provider output-token limit is invalid");
+    }
+    const maxOutputTokensPerRequest =
+      options.maxOutputTokensPerRequest ??
+      (hasBudget ? DEFAULT_MAX_OUTPUT_TOKENS_PER_REQUEST : null);
     const secretHandle = this.#secretProvider.issueHandle(
       {
         schemaVersion: 1,
@@ -129,7 +171,11 @@ export class ProviderEgressBroker {
       model: options.model,
       secretHandleId: secretHandle.handleId,
       expiresAt,
-      remainingRequests: this.#maxRequestsPerGrant
+      remainingRequests: this.#maxRequestsPerGrant,
+      remainingBudgetUsd: options.maxBudgetUsd ?? null,
+      inputUsdPerMillion: options.inputUsdPerMillion ?? null,
+      outputUsdPerMillion: options.outputUsdPerMillion ?? null,
+      maxOutputTokensPerRequest
     });
     const address = this.#server.address() as AddressInfo;
     const unsigned = {
@@ -138,7 +184,9 @@ export class ProviderEgressBroker {
       provider: options.provider,
       model: options.model,
       expiresAt,
-      endpoint: `http://127.0.0.1:${String(address.port)}/${options.provider}`
+      endpoint: `http://${this.#advertisedHost}:${String(address.port)}/${options.provider}`,
+      maxBudgetUsd: options.maxBudgetUsd ?? null,
+      maxOutputTokensPerRequest
     };
     return { ...unsigned, token, grantDigest: sha256(JSON.stringify(unsigned)) };
   }
@@ -178,6 +226,11 @@ export class ProviderEgressBroker {
       return;
     }
     const url = new URL(request.url ?? "/", "http://broker.invalid");
+    if (url.search !== "") {
+      response.writeHead(403, { "content-type": "application/json" });
+      response.end('{"error":"query_not_allowed"}');
+      return;
+    }
     const prefix = `/${grant.provider}`;
     if (!url.pathname.startsWith(prefix)) {
       response.writeHead(403, { "content-type": "application/json" });
@@ -190,7 +243,7 @@ export class ProviderEgressBroker {
       response.end('{"error":"endpoint_not_allowed"}');
       return;
     }
-    const body = await readRequest(request, this.#maxRequestBytes);
+    let body = await readRequest(request, this.#maxRequestBytes);
     let bodyValue: unknown;
     try {
       bodyValue = JSON.parse(body.toString("utf8"));
@@ -208,6 +261,53 @@ export class ProviderEgressBroker {
       response.writeHead(403, { "content-type": "application/json" });
       response.end('{"error":"model_not_allowed"}');
       return;
+    }
+    let boundedMaxOutput: number | null = null;
+    if (grant.maxOutputTokensPerRequest !== null) {
+      if (typeof bodyValue !== "object" || bodyValue === null || Array.isArray(bodyValue)) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end('{"error":"request_object_required"}');
+        return;
+      }
+      const value = bodyValue as Record<string, unknown>;
+      const outputField = grant.provider === "openai" ? "max_output_tokens" : "max_tokens";
+      const requestedMaxOutput = value[outputField];
+      if (requestedMaxOutput === undefined) {
+        value[outputField] = grant.maxOutputTokensPerRequest;
+        boundedMaxOutput = grant.maxOutputTokensPerRequest;
+        body = Buffer.from(JSON.stringify(value));
+        if (body.byteLength > this.#maxRequestBytes) {
+          response.writeHead(413, { "content-type": "application/json" });
+          response.end('{"error":"request_too_large_after_bounding"}');
+          return;
+        }
+      } else if (
+        !Number.isSafeInteger(requestedMaxOutput) ||
+        Number(requestedMaxOutput) <= 0 ||
+        Number(requestedMaxOutput) > grant.maxOutputTokensPerRequest
+      ) {
+        response.writeHead(403, { "content-type": "application/json" });
+        response.end('{"error":"output_token_limit_exceeded"}');
+        return;
+      } else {
+        boundedMaxOutput = Number(requestedMaxOutput);
+      }
+    }
+    if (
+      grant.remainingBudgetUsd !== null &&
+      grant.inputUsdPerMillion !== null &&
+      grant.outputUsdPerMillion !== null &&
+      boundedMaxOutput !== null
+    ) {
+      const reservedCost =
+        (body.byteLength * grant.inputUsdPerMillion) / 1_000_000 +
+        (boundedMaxOutput * grant.outputUsdPerMillion) / 1_000_000;
+      if (reservedCost > grant.remainingBudgetUsd) {
+        response.writeHead(402, { "content-type": "application/json" });
+        response.end('{"error":"budget_exhausted"}');
+        return;
+      }
+      grant.remainingBudgetUsd -= reservedCost;
     }
     grant.remainingRequests -= 1;
     const providerSecret = this.#secretProvider.consume(
@@ -234,6 +334,9 @@ export class ProviderEgressBroker {
         redirect: "manual"
       }
     );
+    if (upstream.status >= 300 && upstream.status < 400) {
+      throw new Error("Provider redirect was rejected");
+    }
     response.writeHead(upstream.status, {
       "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
       "cache-control": "no-store"

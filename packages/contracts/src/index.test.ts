@@ -4,6 +4,7 @@ import {
   AUTOMATIC_ACTION_ALLOWLIST,
   DriverEventBatchV1Schema,
   ExtensionManifestV1Schema,
+  OutboundReconcileRequestV1Schema,
   isAutomaticActionAllowed
 } from "./index.js";
 
@@ -64,5 +65,37 @@ describe("public V1 contracts", () => {
     expect(isAutomaticActionAllowed("merge")).toBe(false);
     expect(isAutomaticActionAllowed("secret.change")).toBe(false);
     expect(AUTOMATIC_ACTION_ALLOWLIST.size).toBe(10);
+  });
+
+  it("rejects a prior outbound receipt that is not bound to the exact effect", () => {
+    const effect = {
+      schemaVersion: 1 as const,
+      adapterId: "github-app",
+      effectKey: "effect-1",
+      action: "github.comment.create" as const,
+      target: "anirudh/parallelplay-fixture",
+      payload: { body: "Result" },
+      payloadDigest: digest("payload"),
+      preconditionDigest: digest("precondition"),
+      policyPromotionDigest: digest("promotion")
+    };
+    expect(() =>
+      OutboundReconcileRequestV1Schema.parse({
+        schemaVersion: 1,
+        effect,
+        priorReceipt: {
+          schemaVersion: 1,
+          adapterId: "github-app",
+          effectKey: "effect-1",
+          action: "github.comment.create",
+          payloadDigest: digest("different-payload"),
+          externalId: "https://api.github.test/comments/1",
+          requestId: null,
+          observedStateDigest: digest("observed"),
+          acceptedAt: "2026-08-23T00:00:00.000Z",
+          receiptDigest: digest("receipt")
+        }
+      })
+    ).toThrow(/payloadDigest/);
   });
 });
