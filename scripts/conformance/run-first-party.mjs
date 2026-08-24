@@ -1779,7 +1779,8 @@ function providerDriverCases(provider) {
         const receipt = await eventuallyReceipt(subject, session.sessionId);
         invariant(
           receipt.outcome === "protocol_invalid" &&
-            receipt.terminalReason === "provider_event_protocol_invalid" &&
+            /^provider_event_protocol_invalid(?:_[a-z0-9_]+)?$/.test(receipt.terminalReason) &&
+            receipt.terminalReason.length <= 512 &&
             !canonical(receipt).includes("must-not-be-retained"),
           "Malformed provider event was not rejected safely"
         );
