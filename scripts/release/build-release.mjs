@@ -145,7 +145,9 @@ function nativeNotificationBridgeEntry(cliPrefix, platform) {
   if (platform !== "macos-arm64") return [];
   const temporary = mkdtempSync(join(tmpdir(), "parallelplay-notification-bridge-"));
   try {
-    const output = join(temporary, "parallelplay-notification-bridge");
+    const executableName = "ParallelPlayNotificationBridge";
+    const appRoot = `${cliPrefix}/libexec/${executableName}.app/Contents`;
+    const output = join(temporary, executableName);
     execFileSync(process.execPath, ["scripts/notifications/build-macos-bridge.mjs", output], {
       stdio: "inherit",
       env: { ...process.env, LANG: "C", LC_ALL: "C" }
@@ -153,9 +155,15 @@ function nativeNotificationBridgeEntry(cliPrefix, platform) {
     return [
       memoryEntry(
         `${cliPrefix}/libexec/parallelplay-notification-bridge`,
-        readFileSync(output),
+        `#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec "$ROOT/libexec/${executableName}.app/Contents/MacOS/${executableName}"\n`,
         0o755
-      )
+      ),
+      memoryEntry(
+        `${appRoot}/Info.plist`,
+        `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>CFBundleDevelopmentRegion</key>\n  <string>en</string>\n  <key>CFBundleDisplayName</key>\n  <string>ParallelPlay</string>\n  <key>CFBundleExecutable</key>\n  <string>${executableName}</string>\n  <key>CFBundleIdentifier</key>\n  <string>com.anirudh.parallelplay.notification-bridge</string>\n  <key>CFBundleInfoDictionaryVersion</key>\n  <string>6.0</string>\n  <key>CFBundleName</key>\n  <string>ParallelPlay</string>\n  <key>CFBundlePackageType</key>\n  <string>APPL</string>\n  <key>CFBundleShortVersionString</key>\n  <string>0.1.0</string>\n  <key>CFBundleVersion</key>\n  <string>1</string>\n  <key>LSBackgroundOnly</key>\n  <true/>\n  <key>NSUserNotificationAlertStyle</key>\n  <string>alert</string>\n</dict>\n</plist>\n`,
+        0o644
+      ),
+      memoryEntry(`${appRoot}/MacOS/${executableName}`, readFileSync(output), 0o755)
     ];
   } finally {
     rmSync(temporary, { recursive: true, force: true });

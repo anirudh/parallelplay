@@ -1,9 +1,13 @@
 import { createHash, createHmac } from "node:crypto";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionManifestV1 } from "@parallelplay/contracts";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   DesktopNotificationAdapter,
   SignedWebhookAdapter,
+  StdioDesktopNotificationBridge,
   notificationPayloadDigest,
   type DesktopNotificationBridgeV1
 } from "./index.js";
@@ -43,6 +47,13 @@ const authority = {
   recordReceipt: () => Promise.resolve(),
   recordFailure: () => Promise.resolve()
 };
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 describe("signed webhook adapter", () => {
   it("signs one idempotent bounded payload without putting authority in the deep link", async () => {
@@ -165,6 +176,21 @@ describe("signed webhook adapter", () => {
 });
 
 describe("desktop notification adapter", () => {
+  it("rejects a closed bridge protocol without an unhandled pipe error", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "parallelplay-closed-notification-bridge-"));
+    temporaryDirectories.push(directory);
+    const executable = join(directory, "closed-bridge");
+    writeFileSync(executable, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+    chmodSync(executable, 0o700);
+    const bridge = new StdioDesktopNotificationBridge({ executable });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+
+    await expect(bridge.query("a".repeat(64))).rejects.toThrow(
+      /Notification bridge (?:closed its protocol|write failed)/
+    );
+    await bridge.close();
+  });
+
   it("uses a stable bridge identity and reconciles delivered state after restart", async () => {
     const delivered = new Set<string>();
     const bridge = (): DesktopNotificationBridgeV1 => ({

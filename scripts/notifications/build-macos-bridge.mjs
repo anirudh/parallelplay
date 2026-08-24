@@ -15,12 +15,14 @@ execFileSync(
     "arm64-apple-macos12.0",
     "-module-cache-path",
     "/tmp/parallelplay-swift-module-cache",
-    "-Xlinker",
-    "-no_uuid",
     "native/macos-notification-bridge/main.swift",
     "-o",
     output
   ],
   { stdio: "inherit", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C", LC_ALL: "C" } }
 );
+execFileSync(process.execPath, ["scripts/notifications/normalize-macos-bridge.mjs", output], {
+  stdio: "inherit",
+  env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C", LC_ALL: "C" }
+});
 process.stdout.write(`${JSON.stringify({ ok: true, output })}\n`);

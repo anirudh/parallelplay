@@ -91,6 +91,16 @@ export function inspectRelease(directory) {
       if (!entries.some((entry) => entry.path.endsWith("/fixture/manifest.json"))) {
         failures.push(`${name}: fixture manifest is missing`);
       }
+      if (buildManifest.platform === "macos-arm64") {
+        for (const suffix of [
+          "/libexec/ParallelPlayNotificationBridge.app/Contents/Info.plist",
+          "/libexec/ParallelPlayNotificationBridge.app/Contents/MacOS/ParallelPlayNotificationBridge"
+        ]) {
+          if (!entries.some((entry) => entry.path.endsWith(suffix))) {
+            failures.push(`${name}: macOS notification app entry is missing: ${suffix}`);
+          }
+        }
+      }
     }
     if (
       name.includes("cli-") &&

@@ -150,6 +150,7 @@ export class StdioDesktopNotificationBridge implements DesktopNotificationBridge
       }
     });
     this.#child.stderr.resume();
+    this.#child.stdin.on("error", () => undefined);
     this.#lines = createInterface({ input: this.#child.stdout, crlfDelay: Infinity });
     this.#iterator = this.#lines[Symbol.asyncIterator]();
   }
@@ -185,9 +186,18 @@ export class StdioDesktopNotificationBridge implements DesktopNotificationBridge
     const requestId = randomUUID();
     const execute = async (): Promise<unknown> => {
       if (this.#closed && operation !== "close") throw new Error("Notification bridge is closed");
-      this.#child.stdin.write(
-        `${JSON.stringify({ schemaVersion: 1, requestId, operation, input })}\n`
-      );
+      if (this.#child.exitCode !== null || this.#child.stdin.destroyed) {
+        throw new Error("Notification bridge closed its protocol");
+      }
+      await new Promise<void>((resolvePromise, reject) => {
+        this.#child.stdin.write(
+          `${JSON.stringify({ schemaVersion: 1, requestId, operation, input })}\n`,
+          (error) => {
+            if (error) reject(new Error("Notification bridge write failed"));
+            else resolvePromise();
+          }
+        );
+      });
       let timeout: NodeJS.Timeout | undefined;
       let response: IteratorResult<string>;
       try {
