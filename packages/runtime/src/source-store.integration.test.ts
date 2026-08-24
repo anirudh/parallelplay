@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SourceRevisionState } from "@parallelplay/kernel";
 import { ManagedGitRevisionStore, initializeSourceStore } from "./source-store.js";
@@ -64,6 +65,36 @@ afterEach(() => {
   for (const directory of directories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+it("captures an exact commit from a shallow checkout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "parallelplay-shallow-capture-"));
+  directories.push(root);
+  const upstream = join(root, "upstream");
+  const shallow = join(root, "shallow");
+  const sourceRoot = join(root, "source");
+  execFileSync("git", ["init", upstream]);
+  git(upstream, "config", "user.name", "ParallelPlay Test");
+  git(upstream, "config", "user.email", "parallelplay@example.test");
+  writeFileSync(join(upstream, "fixture.txt"), "first\n");
+  commit(upstream, "first");
+  writeFileSync(join(upstream, "fixture.txt"), "second\n");
+  commit(upstream, "second");
+  execFileSync("git", ["clone", "--depth", "1", pathToFileURL(upstream).href, shallow]);
+  expect(existsSync(join(shallow, ".git", "shallow"))).toBe(true);
+
+  initializeSourceStore(sourceRoot);
+  const store = new ManagedGitRevisionStore(sourceRoot);
+  const captured = await store.capture({
+    repositoryId,
+    revisionId: uuid(99),
+    captureKey: "shallow-capture",
+    repositoryPath: shallow,
+    ref: "HEAD"
+  });
+
+  expect(captured.commitOid).toBe(git(shallow, "rev-parse", "HEAD"));
+  expect(await store.verify(state(captured))).toEqual({ valid: true, reason: null });
 });
 
 describe.each(["sha1", "sha256"] as const)("managed Git integration (%s)", (objectFormat) => {

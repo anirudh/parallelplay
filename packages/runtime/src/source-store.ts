@@ -348,6 +348,7 @@ export class ManagedGitRevisionStore implements GitRevisionStore {
         "--git-dir",
         repository,
         "fetch",
+        "--update-shallow",
         "--no-tags",
         "--force",
         source,
